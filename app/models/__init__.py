@@ -1,0 +1,2 @@
+"""Domain models (MongoDB documents)."""
+

@@ -1,0 +1,273 @@
+{
+  "site_logo_url": "/logo.png",
+  "site_logo_display_height": 40,
+  "site_logo_type": "text",
+  "site_logo_text": "Bvonix Academy",
+  "hero_headline": "Learn Skills.\nBuild Projects.\nStart Earning.",
+  "hero_description": "Practical, Industry-Ready & Earning-Focused Tech Education",
+  "hero_cta_text": "Enroll Now",
+  "hero_cta_link": "/register",
+  "hero_cta_subtext": "From Learning to Earning - The Right Way.",
+  "hero_social_text": "Admissions Open - Starting 1st Jun 2026",
+  "hero_icon_url": "/uploads/hero_icons/hero_icon_df09c9bdcc5ac50f.png",
+  "hero_image_alt": "Students learning at Bvonix Academy",
+  "community_header": "INTERNSHIP & JOB PROGRAM",
+  "community_title": "Industry-Ready Courses for Modern Careers",
+  "community_description": "We don't just teach \u00e2\u20ac\u201d we train students to earn. Bvonix Academy provides practical, earning-oriented education focused on real-world skills, real client projects, and real income opportunities.",
+  "community_stat1_value": "Internship",
+  "community_stat1_label": "During the Course",
+  "community_stat2_value": "Real",
+  "community_stat2_label": "Software House Projects",
+  "community_stat3_value": "Job",
+  "community_stat3_label": "Offers for Skilled Students",
+  "community_image_url": null,
+  "community_image_alt": "Students in a modern tech classroom",
+  "milestones_items": [
+    {
+      "value": "80%",
+      "label": "Practical Learning"
+    },
+    {
+      "value": "20%",
+      "label": "Theory"
+    },
+    {
+      "value": "50%",
+      "label": "Scholarship"
+    },
+    {
+      "value": "3,000",
+      "label": "PKR / Month Fee"
+    },
+    {
+      "value": "Jan 2026",
+      "label": "Batch Start Date"
+    }
+  ],
+  "benefits_header": "KEY HIGHLIGHTS",
+  "benefits_title": "Why Bvonix Academy Stands Out",
+  "benefits_items": [
+    {
+      "title": "80% Practical Learning",
+      "description": "Learn by doing with hands-on exercises, labs, and real-world assignments.",
+      "icon_url": null,
+      "background_color": "#1a2b4e"
+    },
+    {
+      "title": "Real-World Projects",
+      "description": "Work on actual client projects from our software house during training.",
+      "icon_url": null,
+      "background_color": "#2563EB"
+    },
+    {
+      "title": "Job After Course",
+      "description": "Career placement support and job offers for skilled, consistent students.",
+      "icon_url": null,
+      "background_color": "#7C3AED"
+    },
+    {
+      "title": "Internship During Course",
+      "description": "Paid and unpaid internships based on your skill level and progress.",
+      "icon_url": null,
+      "background_color": "#0891B2"
+    },
+    {
+      "title": "Freelancing & Job Guidance",
+      "description": "Upwork, Fiverr, and remote work mentorship to start earning early.",
+      "icon_url": null,
+      "background_color": "#EA580C"
+    },
+    {
+      "title": "Multiple Earning Opportunities",
+      "description": "SaaS products, app monetization, freelancing, and remote career paths.",
+      "icon_url": null,
+      "background_color": "#059669"
+    }
+  ],
+  "subjects_header": "COURSES WE OFFER",
+  "subjects_title": "Industry-Ready Programs for Modern Careers",
+  "subjects_items": [
+    {
+      "title": "Python Development",
+      "subtitle": "Fundamentals, Backend Frameworks, APIs & Database Integration",
+      "icon_url": null,
+      "background_color": "#3776AB"
+    },
+    {
+      "title": "Web Development",
+      "subtitle": "HTML, CSS, JavaScript, Frontend, Backend & Deployment",
+      "icon_url": null,
+      "background_color": "#E44D26"
+    },
+    {
+      "title": "Full Stack Development",
+      "subtitle": "End-to-end web applications from frontend to backend",
+      "icon_url": null,
+      "background_color": "#6366F1"
+    },
+    {
+      "title": "Android App Development",
+      "subtitle": "App development, Play Store publishing & monetization",
+      "icon_url": null,
+      "background_color": "#3DDC84"
+    },
+    {
+      "title": "AI Development",
+      "subtitle": "AI applications, chatbots & intelligent integrations",
+      "icon_url": null,
+      "background_color": "#8B5CF6"
+    },
+    {
+      "title": "AI Chatbot & Agent Dev",
+      "subtitle": "Build AI agents and automation workflows with modern tools",
+      "icon_url": null,
+      "background_color": "#A855F7"
+    },
+    {
+      "title": "Automation & Workflow",
+      "subtitle": "n8n and workflow automation for business processes",
+      "icon_url": null,
+      "background_color": "#0EA5E9"
+    },
+    {
+      "title": "Digital Marketing",
+      "subtitle": "Grow brands online with modern marketing strategies",
+      "icon_url": null,
+      "background_color": "#F97316"
+    },
+    {
+      "title": "Freelancing Course",
+      "subtitle": "Upwork, Fiverr & remote client acquisition skills",
+      "icon_url": null,
+      "background_color": "#14B8A6"
+    },
+    {
+      "title": "Remote Work Mastery",
+      "subtitle": "Build a sustainable remote career and income stream",
+      "icon_url": null,
+      "background_color": "#64748B"
+    },
+    {
+      "title": "SaaS & App Monetization",
+      "subtitle": "Product development, ads & in-app purchase strategies",
+      "icon_url": null,
+      "background_color": "#EC4899"
+    },
+    {
+      "title": "AI & Automation Programs",
+      "subtitle": "AI tools, integrations & agent development with n8n",
+      "icon_url": null,
+      "background_color": "#4F46E5"
+    }
+  ],
+  "testimonials_header": "OUR TESTIMONIALS",
+  "testimonials_title": "What Our Students Say About Us",
+  "testimonials_items": [
+    {
+      "testimonial_text": "Bvonix Academy transformed my learning journey. The practical approach and real client projects helped me start earning while still in the course.",
+      "author_name": "Student",
+      "author_title": "Web Development",
+      "author_avatar_url": null
+    },
+    {
+      "testimonial_text": "Best decision I ever made. Hands-on projects, internship during the course, and freelancing guidance made learning practical and rewarding.",
+      "author_name": "Student",
+      "author_title": "Full Stack Development",
+      "author_avatar_url": null
+    },
+    {
+      "testimonial_text": "We don't just learn theory \u00e2\u20ac\u201d we build real projects. The mentors guide you from learning to earning the right way.",
+      "author_name": "Student",
+      "author_title": "AI Development",
+      "author_avatar_url": null
+    },
+    {
+      "testimonial_text": "Outstanding curriculum with industry-ready skills. The internship program gave me confidence to apply for jobs and freelancing gigs.",
+      "author_name": "Student",
+      "author_title": "Android Development",
+      "author_avatar_url": null
+    }
+  ],
+  "dashboard_banner_title": "Sharpen Your Skills With Industry-Ready Tech Courses",
+  "dashboard_banner_cta_text": "Browse Courses",
+  "dashboard_banner_cta_link": "/courses",
+  "dashboard_youtube_url": "https://www.youtube.com/watch?v=t2_Q2BRzeEE&list=PLGjplNEQ1it8-0CmoljS5yeV-GlKSUEt0",
+  "dashboard_greeting_prefix": "Good Morning",
+  "dashboard_motivational_text": "Continue Your Journey And Achieve Your Target",
+  "dashboard_search_placeholder": "Search your course here...",
+  "dashboard_friends_items": [
+    {
+      "name": "Prashant",
+      "role": "Software Developer",
+      "avatar_url": null
+    }
+  ],
+  "footer_brand_name": "Bvonix Academy",
+  "footer_contact_label": "Contact Bvonix Academy",
+  "footer_contact_type": "phone",
+  "footer_contact_value": "0308-1166897",
+  "footer_address": "Sonara Bazar, Near Gurdwara Sahib, Daharki",
+  "footer_contacts": [
+    {
+      "type": "phone",
+      "value": "0308-1166897"
+    },
+    {
+      "type": "phone",
+      "value": "0309-5061251"
+    },
+    {
+      "type": "whatsapp",
+      "value": "923081166897"
+    }
+  ],
+  "footer_social_links": [
+    {
+      "platform": "whatsapp",
+      "url": "https://wa.me/923081166897"
+    },
+    {
+      "platform": "facebook",
+      "url": ""
+    },
+    {
+      "platform": "twitter",
+      "url": ""
+    },
+    {
+      "platform": "email",
+      "url": ""
+    },
+    {
+      "platform": "youtube",
+      "url": ""
+    },
+    {
+      "platform": "instagram",
+      "url": ""
+    }
+  ],
+  "footer_legal_links": [
+    {
+      "label": "Cookie Policy",
+      "url": "/cookie-policy"
+    },
+    {
+      "label": "Privacy Policy",
+      "url": "/privacy-policy"
+    },
+    {
+      "label": "Terms and Conditions",
+      "url": "/terms"
+    },
+    {
+      "label": "Contact Us",
+      "url": "/contact"
+    },
+    {
+      "label": "About",
+      "url": "/about"
+    }
+  ],
+  "footer_copyright_text": "\u00c2\u00a9 2026 Bvonix Academy. All rights reserved."
+}

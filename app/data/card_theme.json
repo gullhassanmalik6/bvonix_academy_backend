@@ -1,0 +1,31 @@
+{
+  "dimensions": {
+    "width_mm": 53.98,
+    "height_mm": 85.6,
+    "dpi": 300,
+    "orientation": "portrait"
+  },
+  "colors": {
+    "navy": "#0B0B22",
+    "navy_footer": "#0A1628",
+    "purple": "#6D28D9",
+    "purple_light": "#8B5CF6",
+    "purple_gradient": "linear-gradient(90deg, #5B21B6 0%, #7C3AED 45%, #A78BFA 100%)",
+    "banner_gradient": "linear-gradient(90deg, #4C1D95 0%, #6D28D9 55%, #8B5CF6 100%)",
+    "footer_gradient": "linear-gradient(90deg, #4C1D95 0%, #6D28D9 50%, #7C3AED 100%)"
+  },
+  "academy": {
+    "name": "Bvonix Academy",
+    "website": "www.bvonixacademy.com",
+    "email": "info@bvonixacademy.com",
+    "phone": "+92 300 1234567",
+    "authorized_signature_name": "Gul Hassan"
+  },
+  "rules": [
+    "This card must be carried during classes.",
+    "Card is non-transferable.",
+    "Lost cards must be reported immediately.",
+    "Fees must be paid on time.",
+    "Misconduct may result in suspension."
+  ]
+}

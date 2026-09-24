@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Enrollment Card - {{ student_name }}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 16mm;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      color: #1f2937;
+      font-size: 11pt;
+    }
+    .card {
+      max-width: 100%;
+      border: 2px solid #1e40af;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .card-header {
+      background: #1e40af;
+      color: #fff;
+      padding: 14px 20px;
+      text-align: center;
+    }
+    .card-header .logo {
+      max-height: 52px;
+      max-width: 180px;
+      vertical-align: middle;
+      margin-right: 10px;
+    }
+    .card-header .academy-name {
+      font-size: 18pt;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      margin: 0;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    .card-body {
+      padding: 20px;
+      display: table;
+      width: 100%;
+    }
+    .card-body-left {
+      display: table-cell;
+      width: 42%;
+      vertical-align: top;
+      padding-right: 20px;
+    }
+    .card-body-right {
+      display: table-cell;
+      width: 58%;
+      vertical-align: top;
+    }
+    .photo-wrap {
+      text-align: center;
+      margin-bottom: 12px;
+    }
+    .photo-wrap img {
+      width: 120px;
+      height: 150px;
+      object-fit: cover;
+      border: 2px solid #e5e7eb;
+      border-radius: 4px;
+    }
+    .photo-placeholder {
+      width: 120px;
+      height: 150px;
+      margin: 0 auto;
+      border: 2px dashed #d1d5db;
+      border-radius: 4px;
+      background: #f9fafb;
+      display: block;
+    }
+    .label {
+      font-size: 9pt;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 2px;
+    }
+    .value {
+      font-size: 12pt;
+      font-weight: 600;
+      color: #111827;
+      margin-bottom: 10px;
+    }
+    .value.roll {
+      font-family: 'Consolas', monospace;
+      color: #059669;
+    }
+    .row-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .row-table td {
+      padding: 6px 0;
+      border-bottom: 1px solid #f3f4f6;
+      vertical-align: top;
+    }
+    .row-table .label-cell {
+      width: 28%;
+      font-size: 9pt;
+      color: #6b7280;
+      text-transform: uppercase;
+    }
+    .row-table .value-cell {
+      font-size: 11pt;
+      font-weight: 500;
+    }
+    .card-footer {
+      padding: 16px 20px;
+      border-top: 1px solid #e5e7eb;
+      background: #f9fafb;
+      display: table;
+      width: 100%;
+    }
+    .footer-qr {
+      display: table-cell;
+      width: 90px;
+      vertical-align: middle;
+      text-align: center;
+    }
+    .footer-qr img {
+      width: 72px;
+      height: 72px;
+    }
+    .footer-qr .qr-caption {
+      font-size: 8pt;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+    .footer-signature {
+      display: table-cell;
+      vertical-align: middle;
+      padding-left: 16px;
+    }
+    .signature-placeholder {
+      border-bottom: 1px solid #374151;
+      width: 180px;
+      height: 32px;
+      margin-bottom: 2px;
+    }
+    .signature-label {
+      font-size: 8pt;
+      color: #6b7280;
+      text-transform: uppercase;
+    }
+    .validity-note {
+      font-size: 8pt;
+      color: #6b7280;
+      text-align: center;
+      margin-top: 10px;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="card-header">
+      {% if academy_logo_url %}
+      <img class="logo" src="{{ academy_logo_url }}" alt="Academy Logo">
+      {% endif %}
+      <h1 class="academy-name">{{ academy_name }}</h1>
+    </div>
+    <div class="card-body">
+      <div class="card-body-left">
+        <div class="photo-wrap">
+          {% if student_photo_url %}
+          <img src="{{ student_photo_url }}" alt="Student Photo">
+          {% else %}
+          <span class="photo-placeholder"></span>
+          {% endif %}
+        </div>
+        <div class="label">Name</div>
+        <div class="value">{{ student_name }}</div>
+        <div class="label">Roll / Enrollment ID</div>
+        <div class="value roll">{{ enrollment_id }}</div>
+      </div>
+      <div class="card-body-right">
+        <table class="row-table">
+          <tr>
+            <td class="label-cell">Course</td>
+            <td class="value-cell">{{ course_title }}</td>
+          </tr>
+          <tr>
+            <td class="label-cell">Batch</td>
+            <td class="value-cell">{{ batch }}</td>
+          </tr>
+          <tr>
+            <td class="label-cell">Class Type</td>
+            <td class="value-cell">{{ class_type }}</td>
+          </tr>
+          <tr>
+            <td class="label-cell">Issue Date</td>
+            <td class="value-cell">{{ issue_date }}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+    <div class="card-footer">
+      {% if qr_data_uri %}
+      <div class="footer-qr">
+        <img src="{{ qr_data_uri }}" alt="QR Code">
+        <div class="qr-caption">Verify</div>
+      </div>
+      {% endif %}
+      <div class="footer-signature">
+        <div class="signature-placeholder"></div>
+        <div class="signature-label">Authorized Signature</div>
+      </div>
+    </div>
+    <div class="validity-note">This enrollment card is valid only after payment verification by the administration.</div>
+  </div>
+</body>
+</html>

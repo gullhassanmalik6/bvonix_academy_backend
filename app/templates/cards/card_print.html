@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>{{ academy_name }} — Enrollment Card</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Great+Vibes&display=swap" rel="stylesheet" />
+  <style>
+    @page {
+      size: {{ width_mm }}mm {{ height_mm }}mm;
+      margin: 0;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      background: #fff;
+    }
+
+    .card-page {
+      width: {{ width_mm }}mm;
+      height: {{ height_mm }}mm;
+      overflow: hidden;
+      position: relative;
+      background: #fff;
+      border-radius: 3.5mm;
+      page-break-after: always;
+      break-after: page;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card-page:last-child { page-break-after: auto; break-after: auto; }
+
+    /* ── Logo (official image) ── */
+    .logo-block {
+      text-align: center;
+      padding: 2.5mm 2.5mm 2mm;
+      flex-shrink: 0;
+      background: #fff;
+      width: 100%;
+    }
+    .logo-block img {
+      width: 100%;
+      max-width: 46mm;
+      height: auto;
+      max-height: 10.5mm;
+      object-fit: contain;
+      display: block;
+      margin: 0 auto;
+    }
+    .logo-block.light img {
+      display: none;
+    }
+    .logo-brand {
+      font-size: 3.2mm;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #0B0B22;
+      line-height: 1.1;
+    }
+    .logo-sub {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1.2mm;
+      margin-top: 0.5mm;
+      font-size: 1.65mm;
+      font-weight: 500;
+      color: #64748B;
+    }
+    .logo-sub .line {
+      flex: 1;
+      max-width: 8mm;
+      height: 0.15mm;
+      background: #CBD5E1;
+    }
+    .dot-i { position: relative; display: inline-block; }
+    .diamond-i {
+      position: absolute;
+      left: 50%;
+      top: -0.8mm;
+      width: 0.9mm;
+      height: 0.9mm;
+      margin-left: -0.45mm;
+      background: #7C3AED;
+      transform: rotate(45deg);
+      border-radius: 0.1mm;
+    }
+
+    /* ── Banner ── */
+    .banner {
+      margin: 0 0 0 2mm;
+      width: calc(100% - 2mm);
+      padding: 1.6mm 2mm;
+      background: linear-gradient(90deg, #5B21B6 0%, #7B3FBB 42%, #9333EA 100%);
+      border-radius: 0.3mm 3.6mm 3.6mm 0.3mm;
+      text-align: center;
+      position: relative;
+      flex-shrink: 0;
+      box-shadow: inset 4px 0 8px -3px rgba(59, 20, 120, 0.55);
+    }
+    .banner span {
+      color: #fff;
+      font-size: 1.9mm;
+      font-weight: 700;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      line-height: 1.25;
+    }
+
+    .front-deco {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      overflow: hidden;
+    }
+    .front-deco .s1 {
+      position: absolute;
+      right: 1mm;
+      bottom: 14mm;
+      width: 9mm;
+      height: 5mm;
+      background: linear-gradient(135deg, #A78BFA, #7C3AED);
+      opacity: 0.14;
+      border-radius: 0.3mm;
+      transform: rotate(18deg);
+    }
+    .front-deco .s2 {
+      position: absolute;
+      right: 3mm;
+      bottom: 18mm;
+      width: 7mm;
+      height: 4mm;
+      background: linear-gradient(135deg, #8B5CF6, #6D28D9);
+      opacity: 0.1;
+      border-radius: 0.3mm;
+      transform: rotate(-8deg);
+    }
+
+    /* ── Front main (info row + bottom band) ── */
+    .front-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 0.5mm 2mm 0;
+      position: relative;
+      z-index: 1;
+      overflow: hidden;
+    }
+
+    .front-info-row {
+      display: grid;
+      grid-template-columns: 20mm minmax(0, 1fr);
+      column-gap: 2mm;
+      flex-shrink: 0;
+    }
+
+    .photo-frame {
+      width: 100%;
+      min-height: 32mm;
+      align-self: stretch;
+      border: 0.38mm solid #7B3FBB;
+      border-radius: 0.8mm;
+      overflow: hidden;
+      background: #F1F5F9;
+    }
+    .photo-frame img { width: 100%; height: 100%; min-height: 36mm; object-fit: cover; display: block; }
+    .photo-placeholder {
+      width: 100%; min-height: 36mm; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 2mm; color: #94A3B8; font-weight: 500;
+    }
+
+    .fields-col { min-width: 0; }
+
+    .field-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 1.2mm;
+      padding: 0.55mm 0;
+      border-bottom: 0.12mm solid #E2E8F0;
+    }
+    .field-row:last-child { border-bottom: none; }
+
+    .field-icon {
+      width: 3.4mm;
+      height: 3.4mm;
+      border-radius: 50%;
+      background: #6D28D9;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 0.2mm;
+    }
+    .field-icon svg { width: 1.8mm; height: 1.8mm; fill: #fff; }
+
+    .field-text .lbl {
+      font-size: 1.65mm;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #94A3B8;
+      line-height: 1.2;
+    }
+    .field-text {
+      min-width: 0;
+      overflow: hidden;
+    }
+    .field-text .val {
+      font-size: 2mm;
+      font-weight: 700;
+      color: #0B0B22;
+      line-height: 1.25;
+      margin-top: 0.3mm;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+    .field-text .val.purple { color: #7C3AED; }
+
+    .front-bottom-band {
+      position: relative;
+      flex: 1;
+      min-height: 15mm;
+      margin-top: 1mm;
+    }
+
+    .sig-block {
+      position: absolute;
+      left: -2mm;
+      bottom: 0;
+      width: calc(58% + 2mm);
+      height: 100%;
+      min-height: 15mm;
+      overflow: hidden;
+    }
+    .sig-wave {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .sig-content {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      text-align: center;
+      color: #fff;
+      padding-bottom: 18%;
+      padding-left: 8%;
+      padding-right: 14%;
+    }
+    .sig-script {
+      font-family: 'Great Vibes', cursive;
+      font-size: 4.2mm;
+      line-height: 1;
+      font-weight: 400;
+      white-space: nowrap;
+      margin-bottom: 0.8mm;
+    }
+    .sig-line {
+      width: 68%;
+      height: 0.35mm;
+      background: #fff;
+      margin-bottom: 0.8mm;
+    }
+    .sig-lbl1 {
+      font-size: 1.55mm;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      line-height: 1.2;
+    }
+    .sig-lbl2 {
+      font-size: 1.25mm;
+      font-weight: 500;
+      opacity: 0.92;
+      margin-top: 0.25mm;
+      line-height: 1.2;
+    }
+
+    .qr-section {
+      position: absolute;
+      right: 0;
+      bottom: 0.4mm;
+      z-index: 3;
+    }
+    .qr-wrap {
+      width: 14mm;
+      border: 0.38mm solid #7B3FBB;
+      border-radius: 0.8mm;
+      overflow: hidden;
+      background: #fff;
+    }
+    .qr-inner {
+      padding: 0.3mm;
+      text-align: center;
+      background: #fff;
+    }
+    .qr-inner img { width: 11.5mm; height: 11.5mm; display: inline-block; }
+    .qr-label {
+      background: #7B3FBB;
+      color: #fff;
+      font-size: 1.35mm;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 0.5mm 0.4mm;
+      text-align: center;
+    }
+
+    .footer-navy {
+      flex-shrink: 0;
+      background: #0B0B22;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1mm;
+      padding: 0.9mm 2.5mm;
+      font-size: 1.45mm;
+      font-weight: 500;
+      border-radius: 0 0 3.5mm 3.5mm;
+    }
+    .footer-navy .fi { display: flex; align-items: center; gap: 0.8mm; }
+    .footer-navy svg { width: 2.2mm; height: 2.2mm; fill: #fff; flex-shrink: 0; }
+    .footer-navy .vsep { width: 0.2mm; height: 2.8mm; background: rgba(255,255,255,0.35); }
+
+    /* ── BACK ── */
+    .back-header {
+      background: #0B0B22;
+      padding: 3mm 3mm 4.5mm;
+      position: relative;
+      flex-shrink: 0;
+    }
+    .back-header .logo-brand { color: #fff; }
+    .back-header .logo-sub { color: rgba(255,255,255,0.88); }
+    .back-header .logo-sub .line { background: rgba(255,255,255,0.35); }
+    .back-header .diamond-i { background: #C4B5FD; }
+    .back-header-wave {
+      position: absolute;
+      left: 0; right: 0; bottom: -0.2mm;
+      width: 100%;
+      height: 3.5mm;
+      display: block;
+    }
+    .back-header-wave path.fill { fill: #fff; }
+    .back-header-wave path.stroke { fill: none; stroke: #8B5CF6; stroke-width: 0.3; }
+
+    .back-body {
+      flex: 1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 0.2mm minmax(0, 1fr);
+      gap: 0 1mm;
+      padding: 1.5mm 2mm 0.8mm;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .back-divider {
+      background: #E2E8F0;
+      width: 0.2mm;
+      margin: 0 auto;
+    }
+    .back-left { padding-right: 0.3mm; min-width: 0; overflow: hidden; }
+    .back-right {
+      position: relative;
+      padding-left: 0.3mm;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .watermark-b {
+      position: absolute;
+      right: -2mm;
+      bottom: 2mm;
+      font-size: 28mm;
+      font-weight: 900;
+      color: rgba(109, 40, 217, 0.07);
+      line-height: 1;
+      pointer-events: none;
+      user-select: none;
+    }
+    .rules-title {
+      font-size: 2.2mm;
+      font-weight: 800;
+      color: #6D28D9;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .rules-underline {
+      width: 10mm;
+      height: 0.35mm;
+      background: #6D28D9;
+      border-radius: 1mm;
+      margin: 0.6mm 0 1.4mm;
+    }
+    .rules-list { list-style: none; position: relative; z-index: 1; }
+    .rules-list li {
+      display: flex;
+      gap: 1mm;
+      align-items: flex-start;
+      font-size: 1.75mm;
+      color: #334155;
+      line-height: 1.35;
+      margin-bottom: 1.2mm;
+      font-weight: 500;
+    }
+    .rules-list li::before {
+      content: '';
+      width: 0.8mm;
+      height: 0.8mm;
+      border-radius: 50%;
+      background: #6D28D9;
+      margin-top: 0.65mm;
+      flex-shrink: 0;
+    }
+
+    .back-footer-wrap {
+      flex-shrink: 0;
+      position: relative;
+    }
+    .back-footer-wave {
+      display: block;
+      width: 100%;
+      height: 3mm;
+    }
+    .back-footer {
+      background: linear-gradient(90deg, #4C1D95 0%, #6D28D9 50%, #7C3AED 100%);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1.6mm 2.8mm;
+      font-size: 1.5mm;
+      font-weight: 500;
+    }
+    .back-footer .help {
+      display: flex;
+      align-items: center;
+      gap: 1mm;
+    }
+    .phone-circle {
+      width: 4mm;
+      height: 4mm;
+      border-radius: 50%;
+      background: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .phone-circle svg { width: 2.2mm; height: 2.2mm; fill: #6D28D9; }
+    .back-footer .social {
+      display: flex;
+      align-items: center;
+      gap: 0.8mm;
+    }
+    .social-dot {
+      width: 3.2mm;
+      height: 3.2mm;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.22);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4mm;
+      font-weight: 700;
+      color: #fff;
+    }
+    .back-footer .vsep { width: 0.2mm; height: 4mm; background: rgba(255,255,255,0.35); }
+  </style>
+</head>
+<body>
+
+  <!-- ═══════════════ FRONT ═══════════════ -->
+  <div class="card-page" id="card-front">
+    <div class="logo-block">
+      {% if logo_data_uri %}
+      <img src="{{ logo_data_uri }}" alt="{{ academy_name }}" />
+      {% else %}
+      <div class="logo-brand">{{ brand_word_html | safe }}</div>
+      <div class="logo-sub"><span class="line"></span><span>{{ brand_suffix }}</span><span class="line"></span></div>
+      {% endif %}
+    </div>
+
+    <div class="banner">
+      <span>Student Enrollment Card</span>
+    </div>
+
+    <div class="front-deco" aria-hidden="true"><span class="s1"></span><span class="s2"></span></div>
+
+    <div class="front-main">
+      <div class="front-info-row">
+        <div class="photo-frame">
+          {% if profile_image_data_uri %}
+          <img src="{{ profile_image_data_uri }}" alt="" />
+          {% else %}
+          <div class="photo-placeholder">Photo</div>
+          {% endif %}
+        </div>
+
+        <div class="fields-col">
+          {% for row in front_fields %}
+          <div class="field-row">
+            <div class="field-icon">{{ row.icon_svg | safe }}</div>
+            <div class="field-text">
+              <div class="lbl">{{ row.label }}</div>
+              <div class="val {{ row.class }}">{{ row.value }}</div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="front-bottom-band">
+        <div class="sig-block">
+          <svg class="sig-wave" viewBox="0 0 180 95" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="sigG" x1="0%" y1="50%" x2="100%" y2="50%">
+                <stop offset="0%" stop-color="#4C1D95"/>
+                <stop offset="45%" stop-color="#6D28D9"/>
+                <stop offset="100%" stop-color="#9333EA"/>
+              </linearGradient>
+            </defs>
+            <path d="M0,95 L0,36 C14,10 52,6 92,22 C118,32 148,28 180,46 L180,95 Z" fill="url(#sigG)"/>
+          </svg>
+          <div class="sig-content">
+            <div class="sig-script">{{ signature_name }}</div>
+            <div class="sig-line"></div>
+            <div class="sig-lbl1">Authorized Signature</div>
+            <div class="sig-lbl2">Director / Admin</div>
+          </div>
+        </div>
+
+        <div class="qr-section">
+          <div class="qr-wrap">
+            <div class="qr-inner"><img src="{{ qr_data_uri }}" alt="QR" /></div>
+            <div class="qr-label">SCAN TO VERIFY</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer-navy">
+      <span class="fi">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+        {{ website }}
+      </span>
+      <span class="vsep"></span>
+      <span class="fi">
+        <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+        {{ support_email }}
+      </span>
+    </div>
+  </div>
+
+  <!-- ═══════════════ BACK ═══════════════ -->
+  <div class="card-page" id="card-back">
+    <div class="back-header">
+      <div class="logo-block light" style="padding:0">
+        <div class="logo-brand" style="color:#fff">{{ brand_word_html | safe }}</div>
+        <div class="logo-sub" style="color:rgba(255,255,255,0.88)">
+          <span class="line" style="background:rgba(255,255,255,0.35)"></span>
+          <span>{{ brand_suffix }}</span>
+          <span class="line" style="background:rgba(255,255,255,0.35)"></span>
+        </div>
+      </div>
+      <svg class="back-header-wave" viewBox="0 0 200 14" preserveAspectRatio="none">
+        <path class="fill" d="M0,0 L0,6 Q50,14 100,8 T200,5 L200,14 L0,14 Z"/>
+        <path class="stroke" d="M0,6 Q50,14 100,8 T200,5"/>
+      </svg>
+    </div>
+
+    <div class="back-body">
+      <div class="back-left">
+        {% for row in back_fields %}
+        <div class="field-row">
+          <div class="field-icon">{{ row.icon_svg | safe }}</div>
+          <div class="field-text">
+            <div class="lbl">{{ row.label }}</div>
+            <div class="val">{{ row.value }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="back-divider"></div>
+      <div class="back-right">
+        <div class="watermark-b">B</div>
+        <div class="rules-title">Academy Rules</div>
+        <div class="rules-underline"></div>
+        <ul class="rules-list">
+          {% for rule in rules %}
+          <li>{{ rule }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+
+    <div class="back-footer-wrap">
+      <svg class="back-footer-wave" viewBox="0 0 200 10" preserveAspectRatio="none">
+        <path d="M0,10 Q60,0 120,5 T200,8 L200,0 L0,0 Z" fill="url(#footerGrad)"/>
+        <defs>
+          <linearGradient id="footerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#4C1D95"/>
+            <stop offset="50%" stop-color="#6D28D9"/>
+            <stop offset="100%" stop-color="#7C3AED"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <div class="back-footer">
+        <div class="help">
+          <span class="phone-circle">
+            <svg viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
+          </span>
+          <span><strong>Need Help?</strong><br/>{{ support_phone }}</span>
+        </div>
+        <span class="vsep"></span>
+        <div class="social">
+          <span>Follow Us</span>
+          <span class="social-dot">f</span>
+          <span class="social-dot">in</span>
+          <span class="social-dot">li</span>
+          <span class="social-dot">yt</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
