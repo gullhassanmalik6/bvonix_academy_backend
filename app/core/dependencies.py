@@ -4,6 +4,7 @@ from fastapi import Depends
 
 from app.db.mongodb import mongodb
 from app.repositories.announcement_repository import AnnouncementRepository
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.assignment_repository import AssignmentRepository, AssignmentSubmissionRepository
 from app.repositories.attendance_repository import AttendanceRepository
 from app.repositories.calendar_event_repository import CalendarEventRepository
@@ -21,6 +22,7 @@ from app.repositories.scholarship_repository import ScholarshipRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.user_repository import UserRepository
 from app.services.announcement_service import AnnouncementService
+from app.services.audit_service import AuditService
 from app.services.assignment_service import AssignmentService
 from app.services.auth_service import AuthService
 from app.services.attendance_service import AttendanceService
@@ -57,8 +59,19 @@ def get_auth_service(users: UserRepository = Depends(get_user_repository)) -> Au
     return AuthService(users)
 
 
-def get_user_service(users: UserRepository = Depends(get_user_repository)) -> UserService:
-    return UserService(users)
+def get_audit_repository() -> AuditLogRepository:
+    return AuditLogRepository(mongodb.db)
+
+
+def get_audit_service(audits: AuditLogRepository = Depends(get_audit_repository)) -> AuditService:
+    return AuditService(audits)
+
+
+def get_user_service(
+    users: UserRepository = Depends(get_user_repository),
+    audit: AuditService = Depends(get_audit_service),
+) -> UserService:
+    return UserService(users, audit=audit)
 
 
 def get_course_service(courses: CourseRepository = Depends(get_course_repository)) -> CourseService:
@@ -71,8 +84,11 @@ def get_instructor_service(
     return InstructorService(instructors)
 
 
-def get_student_service(students: StudentRepository = Depends(get_student_repository)) -> StudentService:
-    return StudentService(students)
+def get_student_service(
+    students: StudentRepository = Depends(get_student_repository),
+    audit: AuditService = Depends(get_audit_service),
+) -> StudentService:
+    return StudentService(students, audit=audit)
 
 
 def get_enrollment_repository() -> EnrollmentRepository:
@@ -141,16 +157,18 @@ def get_scholarship_service(
     notifications: NotificationService = Depends(get_notification_service),
     students: StudentRepository = Depends(get_student_repository),
     courses: CourseRepository = Depends(get_course_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> ScholarshipService:
-    return ScholarshipService(scholarships, notifications, students, courses)
+    return ScholarshipService(scholarships, notifications, students, courses, audit=audit)
 
 
 def get_attendance_service(
     attendances: AttendanceRepository = Depends(get_attendance_repository),
     scholarships: ScholarshipRepository = Depends(get_scholarship_repository),
     scholarship_service: ScholarshipService = Depends(get_scholarship_service),
+    audit: AuditService = Depends(get_audit_service),
 ) -> AttendanceService:
-    return AttendanceService(attendances, scholarships, scholarship_service)
+    return AttendanceService(attendances, scholarships, scholarship_service, audit=audit)
 
 
 def get_course_material_repository() -> CourseMaterialRepository:
@@ -190,8 +208,9 @@ def get_course_material_service(
 def get_assignment_service(
     assignments: AssignmentRepository = Depends(get_assignment_repository),
     submissions: AssignmentSubmissionRepository = Depends(get_assignment_submission_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> AssignmentService:
-    return AssignmentService(assignments, submissions)
+    return AssignmentService(assignments, submissions, audit=audit)
 
 
 def get_live_session_service(
@@ -208,8 +227,9 @@ def get_announcement_service(
 
 def get_payment_service(
     payments: PaymentRepository = Depends(get_payment_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> PaymentService:
-    return PaymentService(payments)
+    return PaymentService(payments, audit=audit)
 
 
 def get_forum_service(

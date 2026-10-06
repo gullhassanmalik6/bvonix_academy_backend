@@ -10,6 +10,7 @@ from app.schemas.assignment import (
     AssignmentUpdate,
 )
 from app.models.assignment import Assignment, AssignmentSubmission
+from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import NotFoundError
 
 
@@ -18,9 +19,12 @@ class AssignmentService:
         self,
         assignment_repo: AssignmentRepository,
         submission_repo: AssignmentSubmissionRepository,
+        *,
+        audit: AuditService | None = None,
     ) -> None:
         self._assignments = assignment_repo
         self._submissions = submission_repo
+        self._audit = audit
 
     async def create_assignment(self, payload: AssignmentCreate, created_by: str) -> Assignment:
         """Create a new assignment."""
@@ -143,4 +147,24 @@ class AssignmentService:
         updated = await self._submissions.update(submission_id, update_data)
         if not updated:
             raise NotFoundError("Submission not found")
+        await write_audit(
+            self._audit,
+            action="grade.update",
+            entity_type="assignment_submission",
+            entity_id=updated.id,
+            previous={
+                "id": submission.id,
+                "status": submission.status,
+                "marks_obtained": submission.marks_obtained,
+                "feedback": submission.feedback,
+                "graded_by": submission.graded_by,
+            },
+            current={
+                "id": updated.id,
+                "status": updated.status,
+                "marks_obtained": updated.marks_obtained,
+                "feedback": updated.feedback,
+                "graded_by": updated.graded_by,
+            },
+        )
         return updated

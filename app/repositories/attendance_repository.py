@@ -152,3 +152,13 @@ class AttendanceRepository(BaseRepository[Attendance]):
             stats["total"] += count
         
         return stats
+
+    async def count_statuses(self) -> dict[str, int]:
+        """Count every stored attendance mark by status."""
+        pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
+        counts: dict[str, int] = {}
+        async for doc in self.collection.aggregate(pipeline):
+            if doc.get("_id") is None:
+                continue
+            counts[str(doc["_id"])] = int(doc["count"])
+        return counts

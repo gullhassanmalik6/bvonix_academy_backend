@@ -8,7 +8,20 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from app.core.admin import get_admin_user
+from app.services.audit_context import capture_audit_request
+
+from datetime import datetime
+from typing import Any
+
+from app.core.academy_metrics import attendance_summary
+from app.core.admin import get_admin_user, get_management_user, get_payment_admin, get_scholarship_admin
+from app.core.enrollment_workflow import (
+    ACTIVE,
+    assert_enrollment_transition,
+    enrollment_transition_updates,
+    workflow_state,
+)
+from app.core.permissions import assert_can_delete_user, assert_user_admin_update
 from app.core.dependencies import (
     get_announcement_service,
     get_assignment_service,
@@ -29,6 +42,10 @@ from app.core.dependencies import (
     get_student_service,
     get_user_repository,
     get_user_service,
+    get_audit_repository,
+    get_audit_service,
+    get_attendance_repository,
+    get_certificate_repository,
 )
 from app.models.user import User
 from app.repositories.course_repository import CourseRepository
@@ -36,6 +53,10 @@ from app.repositories.enrollment_repository import EnrollmentRepository
 from app.repositories.instructor_repository import InstructorRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.user_repository import UserRepository
+from app.repositories.attendance_repository import AttendanceRepository
+from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.certificate_repository import CertificateRepository
+from app.schemas.audit_log import AuditLogPublic
 from app.schemas.common import PaginatedResponse
 from app.schemas.announcement import AnnouncementCreate, AnnouncementPublic, AnnouncementUpdate
 from app.schemas.assignment import (
@@ -54,12 +75,15 @@ from app.schemas.enrollment import (
     EnrollmentCardForm,
     EnrollmentCardFormUpdate,
     EnrollmentPublic,
+    EnrollmentTransitionRequest,
     EnrollmentUpdate,
+    enrollment_to_public,
 )
 from app.schemas.scholarship import ScholarshipCreate, ScholarshipPublic, ScholarshipUpdate
 from app.schemas.student import StudentCreate, StudentPublic, StudentUpdate
-from app.schemas.user import UserPublic, UserUpdate
+from app.schemas.user import AdminUserCreate, UserPublic, UserUpdate
 from app.services.announcement_service import AnnouncementService
+from app.services.audit_service import AuditService, snapshot
 from app.services.assignment_service import AssignmentService
 from app.services.attendance_service import AttendanceService
 from app.services.course_material_service import CourseMaterialService
@@ -73,7 +97,7 @@ from app.services.scholarship_service import ScholarshipService
 from app.services.student_service import StudentService
 from app.services.user_service import UserService
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(capture_audit_request)])
 
 
 # ==================== Course Management ====================
@@ -84,7 +108,7 @@ async def admin_list_courses(
     limit: int = Query(default=100, ge=1, le=100),
     published_only: bool = Query(default=False),
     service: CourseService = Depends(get_course_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[CoursePublic]:
     """List all courses (admin only)."""
     if published_only:
@@ -117,7 +141,7 @@ async def admin_list_courses(
 async def admin_create_course(
     payload: CourseCreate,
     service: CourseService = Depends(get_course_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> CoursePublic:
     """Create a new course (admin only)."""
     course = await service.create_course(payload)
@@ -139,7 +163,7 @@ async def admin_update_course(
     course_id: str,
     payload: CourseUpdate,
     service: CourseService = Depends(get_course_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> CoursePublic:
     """Update a course (admin only)."""
     course = await service.update_course(course_id, payload)
@@ -160,7 +184,7 @@ async def admin_update_course(
 async def admin_delete_course(
     course_id: str,
     service: CourseService = Depends(get_course_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete a course (admin only)."""
     await service.delete_course(course_id)
@@ -168,6 +192,25 @@ async def admin_delete_course(
 
 
 # ==================== User Management ====================
+
+@router.post("/users", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
+async def admin_create_user(
+    payload: AdminUserCreate,
+    service: UserService = Depends(get_user_service),
+    admin_user: User = Depends(get_admin_user),
+) -> UserPublic:
+    """Create an account. Public registration cannot do this for administrators."""
+    assert_user_admin_update(admin_user.role, "user", payload.role, None)
+    user = await service.create_user(payload)
+    return UserPublic(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        role=user.role,
+        created_at=user.created_at,
+    )
+
 
 @router.get("/users", response_model=PaginatedResponse[UserPublic])
 async def admin_list_users(
@@ -204,7 +247,14 @@ async def admin_update_user(
     service: UserService = Depends(get_user_service),
     admin_user: User = Depends(get_admin_user),
 ) -> UserPublic:
-    """Update a user (admin only)."""
+    """Update a user (admin only). Role changes to super_admin require a super admin."""
+    existing = await service.get_user(user_id)
+    assert_user_admin_update(
+        admin_user.role,
+        existing.role,
+        payload.role,
+        payload.is_active,
+    )
     user = await service.update_user(user_id, payload)
     return UserPublic(
         id=user.id,
@@ -222,7 +272,9 @@ async def admin_delete_user(
     service: UserService = Depends(get_user_service),
     admin_user: User = Depends(get_admin_user),
 ) -> Response:
-    """Delete a user (admin only)."""
+    """Delete a user (admin only). Super admin accounts require a super admin."""
+    existing = await service.get_user(user_id)
+    assert_can_delete_user(admin_user.role, existing.role)
     await service.delete_user(user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -234,7 +286,7 @@ async def admin_list_instructors(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     service: InstructorService = Depends(get_instructor_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[InstructorPublic]:
     """List all instructors (admin only)."""
     instructors, total = await service.list_instructors(skip=skip, limit=limit)
@@ -318,7 +370,7 @@ async def admin_list_students(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     service: StudentService = Depends(get_student_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[StudentPublic]:
     """List all students (admin only)."""
     students, total = await service.list_students(skip=skip, limit=limit)
@@ -346,7 +398,7 @@ async def admin_list_students(
 async def admin_create_student(
     payload: StudentCreate,
     service: StudentService = Depends(get_student_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> StudentPublic:
     """Create a new student (admin only)."""
     student = await service.create_student(payload)
@@ -366,7 +418,7 @@ async def admin_update_student(
     student_id: str,
     payload: StudentUpdate,
     service: StudentService = Depends(get_student_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> StudentPublic:
     """Update a student (admin only)."""
     student = await service.update_student(student_id, payload)
@@ -401,7 +453,7 @@ async def admin_list_scholarships(
     student_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
     service: ScholarshipService = Depends(get_scholarship_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_scholarship_admin),
 ) -> PaginatedResponse[ScholarshipPublic]:
     """List all scholarships (admin only)."""
     scholarships, total = await service.list_scholarships(
@@ -445,7 +497,7 @@ async def admin_list_scholarships(
 async def admin_create_scholarship(
     payload: ScholarshipCreate,
     service: ScholarshipService = Depends(get_scholarship_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_scholarship_admin),
 ) -> ScholarshipPublic:
     """Create a new scholarship (admin only)."""
     scholarship = await service.create_scholarship(payload)
@@ -476,7 +528,7 @@ async def admin_update_scholarship(
     scholarship_id: str,
     payload: ScholarshipUpdate,
     service: ScholarshipService = Depends(get_scholarship_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_scholarship_admin),
 ) -> ScholarshipPublic:
     """Update a scholarship (admin only)."""
     scholarship = await service.update_scholarship(scholarship_id, payload)
@@ -507,7 +559,7 @@ async def admin_terminate_scholarship(
     scholarship_id: str,
     reason: str = Query(..., description="Termination reason"),
     service: ScholarshipService = Depends(get_scholarship_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_scholarship_admin),
 ) -> ScholarshipPublic:
     """Terminate a scholarship (admin only)."""
     scholarship = await service.terminate_scholarship(scholarship_id, reason, admin_user.id)
@@ -537,7 +589,7 @@ async def admin_terminate_scholarship(
 async def admin_delete_scholarship(
     scholarship_id: str,
     service: ScholarshipService = Depends(get_scholarship_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_scholarship_admin),
 ) -> Response:
     """Delete a scholarship (admin only)."""
     await service.delete_scholarship(scholarship_id)
@@ -550,7 +602,7 @@ async def admin_delete_scholarship(
 async def admin_create_attendance(
     payload: AttendanceCreate,
     service: AttendanceService = Depends(get_attendance_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> AttendancePublic:
     """Mark attendance for a student (admin only)."""
     attendance = await service.create_attendance(payload)
@@ -576,7 +628,7 @@ async def admin_update_attendance(
     attendance_id: str,
     payload: AttendanceUpdate,
     service: AttendanceService = Depends(get_attendance_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> AttendancePublic:
     """Update attendance record (admin only)."""
     attendance = await service.update_attendance(attendance_id, payload)
@@ -603,7 +655,7 @@ async def admin_list_materials(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     service: CourseMaterialService = Depends(get_course_material_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[CourseMaterialPublic]:
     """List all materials for a course (admin only)."""
     materials = await service.get_course_materials(course_id, published_only=False)
@@ -641,7 +693,7 @@ async def admin_list_materials(
 async def admin_create_material(
     payload: CourseMaterialCreate,
     service: CourseMaterialService = Depends(get_course_material_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> CourseMaterialPublic:
     """Create a new course material (admin only)."""
     material = await service.create_material(payload, admin_user.id)
@@ -669,7 +721,7 @@ async def admin_update_material(
     material_id: str,
     payload: CourseMaterialUpdate,
     service: CourseMaterialService = Depends(get_course_material_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> CourseMaterialPublic:
     """Update a course material (admin only)."""
     material = await service.update_material(material_id, payload)
@@ -696,7 +748,7 @@ async def admin_update_material(
 async def admin_delete_material(
     material_id: str,
     service: CourseMaterialService = Depends(get_course_material_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete a course material (admin only)."""
     await service.delete_material(material_id)
@@ -711,7 +763,7 @@ async def admin_list_assignments(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     service: AssignmentService = Depends(get_assignment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[AssignmentPublic]:
     """List all assignments for a course (admin only)."""
     assignments = await service.get_course_assignments(course_id, published_only=False)
@@ -746,7 +798,7 @@ async def admin_list_assignments(
 async def admin_create_assignment(
     payload: AssignmentCreate,
     service: AssignmentService = Depends(get_assignment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> AssignmentPublic:
     """Create a new assignment (admin only)."""
     assignment = await service.create_assignment(payload, admin_user.id)
@@ -771,7 +823,7 @@ async def admin_update_assignment(
     assignment_id: str,
     payload: AssignmentUpdate,
     service: AssignmentService = Depends(get_assignment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> AssignmentPublic:
     """Update an assignment (admin only)."""
     assignment = await service.update_assignment(assignment_id, payload)
@@ -795,7 +847,7 @@ async def admin_update_assignment(
 async def admin_get_submissions(
     assignment_id: str,
     service: AssignmentService = Depends(get_assignment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> list[AssignmentSubmissionPublic]:
     """Get all submissions for an assignment (admin only)."""
     submissions = await service.get_assignment_submissions(assignment_id)
@@ -827,7 +879,7 @@ async def admin_grade_submission(
     marks_obtained: float = Query(..., ge=0),
     feedback: str | None = Query(default=None),
     service: AssignmentService = Depends(get_assignment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> AssignmentSubmissionPublic:
     """Grade an assignment submission (admin only)."""
     submission = await service.grade_submission(submission_id, marks_obtained, feedback, admin_user.id)
@@ -854,7 +906,7 @@ async def admin_grade_submission(
 async def admin_delete_assignment(
     assignment_id: str,
     service: AssignmentService = Depends(get_assignment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete an assignment (admin only)."""
     await service.delete_assignment(assignment_id)
@@ -869,7 +921,7 @@ async def admin_list_sessions(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     service: LiveSessionService = Depends(get_live_session_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[LiveSessionPublic]:
     """List all sessions for a course (admin only)."""
     sessions = await service.get_course_sessions(course_id)
@@ -909,7 +961,7 @@ async def admin_list_sessions(
 async def admin_create_session(
     payload: LiveSessionCreate,
     service: LiveSessionService = Depends(get_live_session_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> LiveSessionPublic:
     """Create a new live session (admin only)."""
     session = await service.create_session(payload, admin_user.id)
@@ -939,7 +991,7 @@ async def admin_update_session(
     session_id: str,
     payload: LiveSessionUpdate,
     service: LiveSessionService = Depends(get_live_session_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> LiveSessionPublic:
     """Update a live session (admin only)."""
     session = await service.update_session(session_id, payload)
@@ -968,7 +1020,7 @@ async def admin_update_session(
 async def admin_delete_session(
     session_id: str,
     service: LiveSessionService = Depends(get_live_session_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete a live session (admin only)."""
     await service.delete_session(session_id)
@@ -983,7 +1035,7 @@ async def admin_list_announcements(
     limit: int = Query(default=100, ge=1, le=100),
     course_id: str | None = Query(default=None),
     service: AnnouncementService = Depends(get_announcement_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[AnnouncementPublic]:
     """List all announcements (admin only)."""
     announcements = await service.get_course_announcements(course_id, published_only=False)
@@ -1017,7 +1069,7 @@ async def admin_list_announcements(
 async def admin_create_announcement(
     payload: AnnouncementCreate,
     service: AnnouncementService = Depends(get_announcement_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> AnnouncementPublic:
     """Create a new announcement (admin only)."""
     announcement = await service.create_announcement(payload, admin_user.id)
@@ -1041,7 +1093,7 @@ async def admin_update_announcement(
     announcement_id: str,
     payload: AnnouncementUpdate,
     service: AnnouncementService = Depends(get_announcement_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> AnnouncementPublic:
     """Update an announcement (admin only)."""
     announcement = await service.update_announcement(announcement_id, payload)
@@ -1064,7 +1116,7 @@ async def admin_update_announcement(
 async def admin_delete_announcement(
     announcement_id: str,
     service: AnnouncementService = Depends(get_announcement_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete an announcement (admin only)."""
     await service.delete_announcement(announcement_id)
@@ -1080,7 +1132,7 @@ async def admin_list_payments(
     student_id: str | None = Query(default=None),
     course_id: str | None = Query(default=None),
     service: PaymentService = Depends(get_payment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_payment_admin),
 ) -> PaginatedResponse[PaymentPublic]:
     """List all payments (admin only)."""
     payments, total = await service.list_payments(
@@ -1124,7 +1176,7 @@ async def admin_list_payments(
 async def admin_create_payment(
     payload: PaymentCreate,
     service: PaymentService = Depends(get_payment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_payment_admin),
 ) -> PaymentPublic:
     """Create a new payment record (admin only)."""
     payment = await service.create_payment(payload, admin_user.id)
@@ -1155,7 +1207,7 @@ async def admin_update_payment(
     payment_id: str,
     payload: PaymentUpdate,
     service: PaymentService = Depends(get_payment_service),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_payment_admin),
 ) -> PaymentPublic:
     """Update a payment (admin only)."""
     payment = await service.update_payment(payment_id, payload)
@@ -1186,12 +1238,13 @@ async def admin_update_payment(
 @router.patch("/enrollments/{enrollment_id}/verify", response_model=EnrollmentPublic)
 async def admin_verify_enrollment(
     enrollment_id: str,
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_payment_admin),
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
     course_repo: CourseRepository = Depends(get_course_repository),
     user_repo: UserRepository = Depends(get_user_repository),
     student_repo: StudentRepository = Depends(get_student_repository),
     notification_service: NotificationService = Depends(get_notification_service),
+    audit: AuditService = Depends(get_audit_service),
 ) -> EnrollmentPublic:
     """Verify enrollment payment and generate enrollment card (admin only)."""
     import logging
@@ -1211,6 +1264,7 @@ async def admin_verify_enrollment(
             logger.error(f"[VERIFY] Enrollment {enrollment_id} not found")
             from app.utils.exceptions import NotFoundError
             raise NotFoundError("Enrollment not found")
+        previous_enrollment = snapshot(enrollment)
         logger.info(f"[VERIFY] Step 1: Success - Enrollment found: {enrollment.id}")
         
         # Check if payment receipt is uploaded
@@ -1220,6 +1274,12 @@ async def admin_verify_enrollment(
             from app.utils.exceptions import AppError
             raise AppError("Cannot verify enrollment. Payment receipt must be uploaded by the student first.")
         logger.info(f"[VERIFY] Step 2: Success - Payment receipt found: {enrollment.payment_receipt_url}")
+        assert_enrollment_transition(
+            admin_user.role,
+            workflow_state(enrollment),
+            ACTIVE,
+            owns_enrollment=False,
+        )
         
         # If payment status is not paid, automatically set it to paid when verifying
         # (Admin verification implies payment confirmation)
@@ -1285,15 +1345,8 @@ async def admin_verify_enrollment(
             logger.error(f"[VERIFY] Step 8: Failed to convert admin_user.id to ObjectId: {admin_user.id}, error: {e}")
             raise
         
-        update_data = {
-            "verified_by_admin": True,
-            "verified_at": now,
-            "verified_by": admin_user_id_obj,
-            "status": "active",  # Activate enrollment after verification
-            "payment_status": payment_status,  # Set to paid if not already
-            "payment_date": payment_date,  # Set payment date if marking as paid
-            "updated_at": now,
-        }
+        update_data = enrollment_transition_updates(enrollment, ACTIVE, actor_id=admin_user.id, now=now)
+        update_data["verified_by"] = admin_user_id_obj
         
         # Only set card URL if generation was successful
         if card_path:
@@ -1326,6 +1379,16 @@ async def admin_verify_enrollment(
             )
         except Exception as notify_err:
             logger.warning(f"[VERIFY] Failed to send verification notification: {notify_err}")
+
+        await audit.record(
+            action="enrollment.verify",
+            entity_type="enrollment",
+            entity_id=enrollment.id,
+            previous=previous_enrollment,
+            current=snapshot(enrollment),
+            actor_id=admin_user.id,
+            actor_role=admin_user.role,
+        )
 
         logger.info(f"[VERIFY] Step 11: Building response")
         try:
@@ -1597,6 +1660,40 @@ async def admin_update_enrollment_card_form(
     )
 
 
+@router.post("/enrollments/{enrollment_id}/transition", response_model=EnrollmentPublic)
+async def admin_transition_enrollment(
+    enrollment_id: str,
+    payload: EnrollmentTransitionRequest,
+    admin_user: User = Depends(get_payment_admin),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+    audit: AuditService = Depends(get_audit_service),
+) -> EnrollmentPublic:
+    """Move an enrollment through review, approval, rejection, resubmission, or refund."""
+    from app.utils.exceptions import NotFoundError
+
+    enrollment = await enrollment_repo.get_by_id(enrollment_id)
+    if not enrollment:
+        raise NotFoundError("Enrollment not found")
+    current = workflow_state(enrollment)
+    assert_enrollment_transition(admin_user.role, current, payload.workflow_state, owns_enrollment=False)
+    updated = await enrollment_repo.update(
+        enrollment_id,
+        enrollment_transition_updates(enrollment, payload.workflow_state, actor_id=admin_user.id),
+    )
+    if not updated:
+        raise NotFoundError("Enrollment not found")
+    await audit.record(
+        action=f"enrollment.{payload.workflow_state}",
+        entity_type="enrollment",
+        entity_id=updated.id,
+        previous=enrollment,
+        current=updated,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+    )
+    return enrollment_to_public(updated)
+
+
 @router.get("/enrollments", response_model=PaginatedResponse[EnrollmentPublic])
 async def admin_list_enrollments(
     skip: int = Query(default=0, ge=0),
@@ -1605,7 +1702,7 @@ async def admin_list_enrollments(
     payment_status: str | None = Query(default=None),
     verified: bool | None = Query(default=None),
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[EnrollmentPublic]:
     """List all enrollments (admin only)."""
     filter_dict: dict[str, any] = {}
@@ -1646,6 +1743,8 @@ async def admin_list_enrollments(
                 verified_by_admin=e.verified_by_admin,
                 verified_at=e.verified_at,
                 verified_by=e.verified_by,
+                review_state=e.review_state,
+                workflow_state=workflow_state(e),
                 created_at=e.created_at,
                 updated_at=e.updated_at,
             )
@@ -1660,9 +1759,10 @@ async def admin_list_enrollments(
 @router.patch("/enrollments/{enrollment_id}/cancel", response_model=EnrollmentPublic)
 async def admin_cancel_enrollment(
     enrollment_id: str,
-    admin_user: User = Depends(get_admin_user),
+    admin_user: User = Depends(get_management_user),
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
     student_repo: StudentRepository = Depends(get_student_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> EnrollmentPublic:
     """Cancel a student enrollment (admin only). Sets status to cancelled and removes course from student's enrolled list."""
     from datetime import datetime, timezone
@@ -1674,18 +1774,31 @@ async def admin_cancel_enrollment(
         raise NotFoundError("Enrollment not found")
     if enrollment.status == "cancelled":
         raise ConflictError("Enrollment is already cancelled")
+    assert_enrollment_transition(
+        admin_user.role,
+        workflow_state(enrollment),
+        "cancelled",
+        owns_enrollment=False,
+    )
+    previous_enrollment = snapshot(enrollment)
 
     updated = await enrollment_repo.update(
         enrollment_id,
-        {
-            "status": "cancelled",
-            "updated_at": datetime.now(timezone.utc),
-        },
+        enrollment_transition_updates(enrollment, "cancelled", actor_id=admin_user.id),
     )
     if not updated:
         raise NotFoundError("Enrollment not found")
 
     await student_repo.unenroll_from_course(enrollment.student_id, enrollment.course_id)
+    await audit.record(
+        action="enrollment.cancel",
+        entity_type="enrollment",
+        entity_id=updated.id,
+        previous=previous_enrollment,
+        current=snapshot(updated),
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+    )
 
     return EnrollmentPublic(
         id=updated.id,
@@ -1712,3 +1825,63 @@ async def admin_cancel_enrollment(
         created_at=updated.created_at,
         updated_at=updated.updated_at,
     )
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _audit_public(record) -> AuditLogPublic:
+    return AuditLogPublic(
+        id=record.id,
+        actor_id=record.actor_id,
+        actor_role=record.actor_role,
+        action=record.action,
+        entity_type=record.entity_type,
+        entity_id=record.entity_id,
+        previous_state=_jsonable(snapshot(record.previous_state)),
+        new_state=_jsonable(snapshot(record.new_state)),
+        context=_jsonable(snapshot(record.context)) or {},
+        created_at=record.created_at,
+    )
+
+
+@router.get("/audit-logs", response_model=PaginatedResponse[AuditLogPublic])
+async def admin_list_audit_logs(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    admin_user: User = Depends(get_admin_user),
+    audits: AuditLogRepository = Depends(get_audit_repository),
+) -> PaginatedResponse[AuditLogPublic]:
+    """Recent sensitive actions. Passwords and tokens are redacted again on read."""
+    records, total = await audits.list_recent(skip=skip, limit=limit)
+    return PaginatedResponse(
+        items=[_audit_public(record) for record in records],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.get("/attendance/summary")
+async def admin_attendance_summary(
+    admin_user: User = Depends(get_management_user),
+    attendances: AttendanceRepository = Depends(get_attendance_repository),
+) -> dict[str, int | float | None]:
+    """Academy attendance rate from stored marks. No marks means there is no rate."""
+    return attendance_summary(await attendances.count_statuses())
+
+
+@router.get("/certificates/summary")
+async def admin_certificate_summary(
+    admin_user: User = Depends(get_management_user),
+    certificates: CertificateRepository = Depends(get_certificate_repository),
+) -> dict[str, int]:
+    """How many certificates are stored. This does not invent a count."""
+    return {"issued": await certificates.count_issued()}

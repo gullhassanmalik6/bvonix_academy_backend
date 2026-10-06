@@ -80,6 +80,18 @@ class MongoDB:
             # This allows server to start, but DB operations will fail with better error messages
             raise RuntimeError(f"MongoDB client creation failed: {e}")
 
+    async def ping(self) -> bool:
+        """Return whether the database answers. Does not raise."""
+        if self._client is None:
+            return False
+        import asyncio
+
+        try:
+            await asyncio.wait_for(self._client.admin.command("ping"), timeout=3.0)
+            return True
+        except Exception:
+            return False
+
     async def disconnect(self) -> None:
         if self._client is not None:
             self._client.close()

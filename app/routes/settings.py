@@ -7,6 +7,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.core.auth import get_current_user
+from app.services.audit_context import capture_audit_request
 from app.core.dependencies import get_user_repository, get_user_service
 from app.core.security import hash_password, verify_password
 from app.models.user import User
@@ -143,6 +144,7 @@ async def update_notification_preferences(
 async def delete_account(
     current_user: User = Depends(get_current_user),
     user_service: UserService = Depends(get_user_service),
+    _request=Depends(capture_audit_request),
 ) -> Response:
     """
     Permanently delete the currently authenticated user's account.

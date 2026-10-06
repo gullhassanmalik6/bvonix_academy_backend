@@ -9,8 +9,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
+from app.core.admin import get_management_user
 from app.core.auth import get_current_user
-from app.core.dependencies import get_course_repository, get_course_service
+from app.core.dependencies import get_course_repository, get_course_service, get_instructor_repository
+from app.core.permissions import can_manage_course
+from app.repositories.instructor_repository import InstructorRepository
+from app.utils.exceptions import ForbiddenError
 from app.models.user import User
 from app.repositories.course_repository import CourseRepository
 from app.schemas.common import PaginatedResponse
@@ -104,7 +108,7 @@ async def get_courses_by_instructor(
 async def create_course(
     payload: CourseCreate,
     service: CourseService = Depends(get_course_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_management_user),
 ) -> CoursePublic:
     """Create a new course."""
     course = await service.create_course(payload)
@@ -126,9 +130,15 @@ async def update_course(
     course_id: str,
     payload: CourseUpdate,
     service: CourseService = Depends(get_course_service),
+    instructors: InstructorRepository = Depends(get_instructor_repository),
     current_user: User = Depends(get_current_user),
 ) -> CoursePublic:
-    """Update a course."""
+    """Update a course. Instructors can update only courses assigned to them."""
+    existing = await service.get_course(course_id)
+    profile = await instructors.get_by_user_id(current_user.id)
+    profile_id = profile.id if profile is not None else None
+    if not can_manage_course(current_user.role, profile_id, existing.instructor_id):
+        raise ForbiddenError("You can only manage courses assigned to you")
     course = await service.update_course(course_id, payload)
     return CoursePublic(
         id=course.id,
@@ -147,7 +157,7 @@ async def update_course(
 async def delete_course(
     course_id: str,
     service: CourseService = Depends(get_course_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete a course."""
     await service.delete_course(course_id)

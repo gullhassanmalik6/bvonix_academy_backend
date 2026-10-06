@@ -21,6 +21,7 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
         await self.collection.create_index([("student_id", ASCENDING)])
         await self.collection.create_index([("course_id", ASCENDING)])
         await self.collection.create_index([("status", ASCENDING)])
+        await self.collection.create_index([("review_state", ASCENDING)])
         await self.collection.create_index([("enrollment_card_number", ASCENDING)], unique=True, sparse=True)
 
     def _to_model(self, doc: dict[str, Any]) -> Enrollment:
@@ -51,6 +52,7 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
             verified_by=oid_str(doc["verified_by"]) if doc.get("verified_by") else None,
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            review_state=doc.get("review_state"),
         )
 
     async def get_by_id(self, enrollment_id: str) -> Enrollment | None:
@@ -173,6 +175,7 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
             "verified_by_admin": False,
             "verified_at": None,
             "verified_by": None,
+            "review_state": None,
             "created_at": now,
             "updated_at": now,
         }

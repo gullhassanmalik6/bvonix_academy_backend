@@ -9,8 +9,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
+from app.core.admin import get_admin_user
 from app.core.auth import get_current_user
 from app.core.dependencies import get_instructor_repository, get_instructor_service
+from app.core.permissions import is_admin
+from app.utils.exceptions import ForbiddenError
 from app.models.user import User
 from app.repositories.instructor_repository import InstructorRepository
 from app.schemas.common import PaginatedResponse
@@ -94,7 +97,7 @@ async def get_instructor_by_user_id(
 async def create_instructor(
     payload: InstructorCreate,
     service: InstructorService = Depends(get_instructor_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
 ) -> InstructorPublic:
     """Create a new instructor."""
     instructor = await service.create_instructor(payload)
@@ -117,7 +120,13 @@ async def update_instructor(
     service: InstructorService = Depends(get_instructor_service),
     current_user: User = Depends(get_current_user),
 ) -> InstructorPublic:
-    """Update an instructor."""
+    """Update an instructor. Instructors can edit only their own profile."""
+    existing = await service.get_instructor(instructor_id)
+    if existing.user_id != current_user.id and not is_admin(current_user.role):
+        raise ForbiddenError("You can only update your own instructor profile")
+    if existing.user_id == current_user.id and not is_admin(current_user.role):
+        if payload.is_active is not None:
+            raise ForbiddenError("You cannot change instructor activation")
     instructor = await service.update_instructor(instructor_id, payload)
     return InstructorPublic(
         id=instructor.id,
@@ -135,7 +144,7 @@ async def update_instructor(
 async def delete_instructor(
     instructor_id: str,
     service: InstructorService = Depends(get_instructor_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
 ) -> Response:
     """Delete an instructor."""
     await service.delete_instructor(instructor_id)

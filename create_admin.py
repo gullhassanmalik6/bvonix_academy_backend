@@ -1,5 +1,8 @@
 """
-Script to create an admin user.
+Operator script to create or promote an admin user.
+
+This is not a public registration path. Ongoing administrator accounts
+are created by an existing admin in User Management.
 
 Usage:
     python create_admin.py <email> <password> [full_name]

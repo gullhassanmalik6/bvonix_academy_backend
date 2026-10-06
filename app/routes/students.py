@@ -9,15 +9,20 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
+from app.services.audit_context import capture_audit_request
+
+from app.core.admin import get_admin_user, get_management_user
 from app.core.auth import get_current_user
 from app.core.dependencies import get_student_repository, get_student_service
+from app.core.permissions import is_management
+from app.utils.exceptions import ForbiddenError
 from app.models.user import User
 from app.repositories.student_repository import StudentRepository
 from app.schemas.common import PaginatedResponse
 from app.schemas.student import StudentCreate, StudentPublic, StudentUpdate
 from app.services.student_service import StudentService
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(capture_audit_request)])
 
 
 @router.get("", response_model=PaginatedResponse[StudentPublic])
@@ -25,9 +30,9 @@ async def list_students(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     service: StudentService = Depends(get_student_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[StudentPublic]:
-    """List all students (paginated)."""
+    """List all students (paginated). Management only."""
     students, total = await service.list_students(skip=skip, limit=limit)
     
     return PaginatedResponse(
@@ -55,8 +60,10 @@ async def get_student(
     service: StudentService = Depends(get_student_service),
     current_user: User = Depends(get_current_user),
 ) -> StudentPublic:
-    """Get a student by ID."""
+    """Get a student by ID. Students can read only their own record."""
     student = await service.get_student(student_id)
+    if student.user_id != current_user.id and not is_management(current_user.role):
+        raise ForbiddenError("You can only access your own student record")
     return StudentPublic(
         id=student.id,
         user_id=student.user_id,
@@ -74,7 +81,9 @@ async def get_student_by_user_id(
     service: StudentService = Depends(get_student_service),
     current_user: User = Depends(get_current_user),
 ) -> StudentPublic:
-    """Get a student by user_id."""
+    """Get a student by user_id. Students can read only their own record."""
+    if user_id != current_user.id and not is_management(current_user.role):
+        raise ForbiddenError("You can only access your own student record")
     student = await service.get_student_by_user_id(user_id)
     return StudentPublic(
         id=student.id,
@@ -93,7 +102,9 @@ async def create_student(
     service: StudentService = Depends(get_student_service),
     current_user: User = Depends(get_current_user),
 ) -> StudentPublic:
-    """Create a new student."""
+    """Create a student profile for yourself, or any student if you manage records."""
+    if payload.user_id != current_user.id and not is_management(current_user.role):
+        raise ForbiddenError("You can only create your own student record")
     student = await service.create_student(payload)
     return StudentPublic(
         id=student.id,
@@ -111,9 +122,9 @@ async def update_student(
     student_id: str,
     payload: StudentUpdate,
     service: StudentService = Depends(get_student_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_management_user),
 ) -> StudentPublic:
-    """Update a student."""
+    """Update a student. Students cannot change another student's record."""
     student = await service.update_student(student_id, payload)
     return StudentPublic(
         id=student.id,
@@ -131,9 +142,9 @@ async def enroll_in_course(
     student_id: str,
     course_id: str,
     service: StudentService = Depends(get_student_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_management_user),
 ) -> StudentPublic:
-    """Enroll a student in a course."""
+    """Enroll a student in a course. Students enroll through the LMS."""
     student = await service.enroll_in_course(student_id, course_id)
     return StudentPublic(
         id=student.id,
@@ -151,7 +162,7 @@ async def unenroll_from_course(
     student_id: str,
     course_id: str,
     service: StudentService = Depends(get_student_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_management_user),
 ) -> StudentPublic:
     """Unenroll a student from a course."""
     student = await service.unenroll_from_course(student_id, course_id)
@@ -170,7 +181,7 @@ async def unenroll_from_course(
 async def delete_student(
     student_id: str,
     service: StudentService = Depends(get_student_service),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
 ) -> Response:
     """Delete a student."""
     await service.delete_student(student_id)

@@ -18,7 +18,7 @@ class User:
     full_name: str | None
     hashed_password: str
     is_active: bool
-    role: str  # "user" or "admin"
+    role: str  # user, academic_manager, admin, or super_admin
     created_at: datetime
 
     @staticmethod

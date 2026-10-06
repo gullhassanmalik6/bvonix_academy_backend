@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, status
 
 from app.core.auth import get_current_user
 from app.core.dependencies import get_auth_service
@@ -16,15 +16,9 @@ router = APIRouter()
 async def register(
     payload: UserCreate,
     auth: AuthService = Depends(get_auth_service),
-    x_admin_secret: str | None = Header(default=None, alias="X-Admin-Secret"),
 ) -> UserPublic:
-    """
-    Register a new user.
-    
-    Regular users are always created with role="user".
-    To register as admin, include X-Admin-Secret header with the ADMIN_SECRET value.
-    """
-    user = await auth.register(payload, admin_secret=x_admin_secret)
+    """Register a student account. Administrator accounts are created by an existing admin."""
+    user = await auth.register(payload)
     return UserPublic(
         id=user.id,
         email=user.email,

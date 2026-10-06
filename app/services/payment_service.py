@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.enrollment_workflow import assert_payment_transition
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.payment import PaymentCreate, PaymentUpdate
 from app.models.payment import Payment
+from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import NotFoundError
 
 
 class PaymentService:
-    def __init__(self, payment_repo: PaymentRepository) -> None:
+    def __init__(self, payment_repo: PaymentRepository, *, audit: AuditService | None = None) -> None:
         self._payments = payment_repo
+        self._audit = audit
 
     async def create_payment(
         self,
@@ -18,7 +21,7 @@ class PaymentService:
         created_by: str | None = None,
     ) -> Payment:
         """Create a new payment record."""
-        return await self._payments.create_payment(
+        payment = await self._payments.create_payment(
             student_id=payload.student_id,
             course_id=payload.course_id,
             enrollment_id=payload.enrollment_id,
@@ -30,6 +33,14 @@ class PaymentService:
             notes=payload.notes,
             created_by=created_by,
         )
+        await write_audit(
+            self._audit,
+            action="payment.create",
+            entity_type="payment",
+            entity_id=payment.id,
+            current=payment,
+        )
+        return payment
 
     async def get_payment(self, payment_id: str) -> Payment:
         """Get payment by ID."""
@@ -72,6 +83,7 @@ class PaymentService:
         
         update_data: dict[str, any] = {}
         if payload.payment_status is not None:
+            assert_payment_transition(payment.payment_status, payload.payment_status)
             update_data["payment_status"] = payload.payment_status
         if payload.transaction_id is not None:
             update_data["transaction_id"] = payload.transaction_id
@@ -89,6 +101,21 @@ class PaymentService:
         updated = await self._payments.update(payment_id, update_data)
         if not updated:
             raise NotFoundError("Payment not found")
+        action = "payment.update"
+        if payload.payment_status == "completed":
+            action = "payment.approve"
+        elif payload.payment_status == "failed":
+            action = "payment.reject"
+        elif payload.payment_status == "refunded":
+            action = "payment.refund"
+        await write_audit(
+            self._audit,
+            action=action,
+            entity_type="payment",
+            entity_id=updated.id,
+            previous=payment,
+            current=updated,
+        )
         return updated
 
     async def delete_payment(self, payment_id: str) -> None:

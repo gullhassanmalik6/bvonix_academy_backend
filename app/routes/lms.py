@@ -13,6 +13,12 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import FileResponse
 
 from app.core.auth import get_current_user
+from app.core.enrollment_workflow import (
+    RECEIPT_UPLOADED,
+    assert_enrollment_transition,
+    enrollment_transition_updates,
+    workflow_state,
+)
 from app.core.dependencies import (
     get_announcement_service,
     get_require_verified_enrollment,
@@ -33,6 +39,7 @@ from app.core.dependencies import (
     get_scholarship_service,
     get_student_repository,
     get_user_repository,
+    get_audit_service,
 )
 from app.models.user import User
 from app.repositories.enrollment_repository import EnrollmentRepository
@@ -61,6 +68,7 @@ from app.services.announcement_service import AnnouncementService
 from app.services.assignment_service import AssignmentService
 from app.services.attendance_service import AttendanceService
 from app.services.calendar_event_service import CalendarEventService
+from app.services.audit_service import AuditService
 from app.services.course_material_service import CourseMaterialService
 from app.services.forum_service import ForumService
 from app.services.live_session_service import LiveSessionService
@@ -107,7 +115,7 @@ async def enroll_in_course(
     enrollment = await enrollment_repo.create_enrollment(
         student_id=student.id,
         course_id=course_id,
-        payment_status=payload.payment_status,
+        payment_status="pending",
         class_type=payload.class_type,
         phone_number=payload.phone_number,
         address=payload.address,
@@ -230,6 +238,7 @@ async def upload_payment_receipt(
     current_user: User = Depends(get_current_user),
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
     student_repo: StudentRepository = Depends(get_student_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> EnrollmentPublic:
     """Upload payment receipt URL for an enrollment."""
     # Get enrollment
@@ -242,17 +251,26 @@ async def upload_payment_receipt(
     if not student or enrollment.student_id != student.id:
         raise ForbiddenError("You can only upload receipts for your own enrollments")
     
-    # Update enrollment with receipt URL
-    receipt_url = payload.receipt_url
-    
-    # Update enrollment
-    updated_enrollment = await enrollment_repo.update(
-        enrollment_id,
-        {
-            "payment_receipt_url": receipt_url,
-            "updated_at": datetime.now(timezone.utc),
-        }
+    current_state = workflow_state(enrollment)
+    assert_enrollment_transition(
+        current_user.role,
+        current_state,
+        RECEIPT_UPLOADED,
+        owns_enrollment=True,
     )
+    updates = enrollment_transition_updates(enrollment, RECEIPT_UPLOADED, actor_id=current_user.id)
+    updates["payment_receipt_url"] = payload.receipt_url
+    updated_enrollment = await enrollment_repo.update(enrollment_id, updates)
+    if updated_enrollment:
+        await audit.record(
+            action="enrollment.receipt_uploaded",
+            entity_type="enrollment",
+            entity_id=enrollment.id,
+            previous=enrollment,
+            current=updated_enrollment,
+            actor_id=current_user.id,
+            actor_role=current_user.role,
+        )
     
     if not updated_enrollment:
         raise NotFoundError("Failed to update enrollment")

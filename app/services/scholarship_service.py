@@ -8,6 +8,7 @@ from app.repositories.course_repository import CourseRepository
 from app.services.notification_service import NotificationService
 from app.schemas.scholarship import ScholarshipCreate, ScholarshipUpdate
 from app.models.scholarship import Scholarship
+from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import NotFoundError
 
 
@@ -18,15 +19,18 @@ class ScholarshipService:
         notification_service: NotificationService | None = None,
         student_repo: StudentRepository | None = None,
         course_repo: CourseRepository | None = None,
+        *,
+        audit: AuditService | None = None,
     ) -> None:
         self._scholarships = scholarship_repo
         self._notifications = notification_service
         self._students = student_repo
         self._courses = course_repo
+        self._audit = audit
 
     async def create_scholarship(self, payload: ScholarshipCreate) -> Scholarship:
         """Create a new scholarship."""
-        return await self._scholarships.create_scholarship(
+        scholarship = await self._scholarships.create_scholarship(
             student_id=payload.student_id,
             course_id=payload.course_id,
             enrollment_id=payload.enrollment_id,
@@ -37,6 +41,14 @@ class ScholarshipService:
             max_absences_per_month=payload.max_absences_per_month,
             notes=payload.notes,
         )
+        await write_audit(
+            self._audit,
+            action="scholarship.create",
+            entity_type="scholarship",
+            entity_id=scholarship.id,
+            current=scholarship,
+        )
+        return scholarship
 
     async def get_scholarship(self, scholarship_id: str) -> Scholarship:
         """Get a scholarship by ID."""
@@ -101,6 +113,14 @@ class ScholarshipService:
         updated = await self._scholarships.update(scholarship_id, update_data)
         if not updated:
             raise NotFoundError("Scholarship not found")
+        await write_audit(
+            self._audit,
+            action="scholarship.update",
+            entity_type="scholarship",
+            entity_id=updated.id,
+            previous=scholarship,
+            current=updated,
+        )
         return updated
 
     async def terminate_scholarship(self, scholarship_id: str, reason: str, terminated_by: str | None = None) -> Scholarship:
@@ -127,6 +147,14 @@ class ScholarshipService:
                     reason=terminated.termination_reason,
                 )
 
+        await write_audit(
+            self._audit,
+            action="scholarship.terminate",
+            entity_type="scholarship",
+            entity_id=terminated.id,
+            previous=scholarship,
+            current=terminated,
+        )
         return terminated
 
     async def delete_scholarship(self, scholarship_id: str) -> None:
@@ -135,6 +163,13 @@ class ScholarshipService:
         deleted = await self._scholarships.delete(scholarship_id)
         if not deleted:
             raise NotFoundError("Scholarship not found")
+        await write_audit(
+            self._audit,
+            action="scholarship.delete",
+            entity_type="scholarship",
+            entity_id=scholarship.id,
+            previous=scholarship,
+        )
 
     async def check_and_update_attendance(
         self,

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = Field(default="BvoniX Academy API", alias="APP_NAME")
+    app_version: str = Field(default="1.0.0", alias="APP_VERSION")
     app_env: str = Field(default="development", alias="APP_ENV")
     api_prefix: str = Field(default="/api", alias="API_PREFIX")
 
@@ -29,8 +30,6 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
 
     allowed_origins: str = Field(default="http://localhost:5173", alias="ALLOWED_ORIGINS")
-    
-    admin_secret: str | None = Field(default=None, alias="ADMIN_SECRET")
 
     # Enrollment card: academy name and logo (path under uploads, e.g. /uploads/academy_logo.png)
     academy_name: str = Field(default="BvoniX Academy", alias="ACADEMY_NAME")
