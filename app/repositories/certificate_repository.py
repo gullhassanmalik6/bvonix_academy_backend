@@ -48,6 +48,9 @@ class CertificateRepository(BaseRepository[Certificate]):
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
         )
 
+    async def count_issued(self) -> int:
+        return await self.collection.count_documents({})
+
     async def get_by_student(self, student_id: str) -> list[Certificate]:
         """Get all certificates for a student."""
         try:

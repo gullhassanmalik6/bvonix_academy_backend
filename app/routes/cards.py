@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.admin import get_admin_user
 from app.core.auth import get_current_user
+from app.core.permissions import is_admin as role_is_admin
 from app.core.config import get_settings
 from app.core.dependencies import (
     get_course_repository,
@@ -189,7 +190,7 @@ async def _resolve_enrollment_context(
     if not enrollment:
         raise NotFoundError("Enrollment not found")
 
-    is_admin = current_user.role == "admin"
+    is_admin = role_is_admin(current_user.role)
     if is_admin and allow_admin:
         pass
     else:

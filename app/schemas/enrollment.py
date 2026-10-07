@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import Field
 
+from app.core.enrollment_workflow import workflow_state
 from app.schemas.common import APIModel
 
 
@@ -114,6 +115,8 @@ class EnrollmentPublic(APIModel):
     verified_by_admin: bool
     verified_at: datetime | None = None
     verified_by: str | None = None
+    review_state: str | None = None
+    workflow_state: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -145,6 +148,14 @@ def enrollment_to_public(enrollment) -> EnrollmentPublic:
         verified_by_admin=enrollment.verified_by_admin,
         verified_at=enrollment.verified_at,
         verified_by=enrollment.verified_by,
+        review_state=getattr(enrollment, "review_state", None),
+        workflow_state=workflow_state(enrollment),
         created_at=enrollment.created_at,
         updated_at=enrollment.updated_at,
+    )
+
+
+class EnrollmentTransitionRequest(APIModel):
+    workflow_state: str = Field(
+        pattern="^(under_review|approved|rejected|resubmission_required|refunded)$"
     )

@@ -4,21 +4,32 @@ from datetime import datetime
 
 from pydantic import EmailStr, Field
 
+from app.core.permissions import ROLE_PATTERN
 from app.schemas.common import APIModel
 
 
 class UserCreate(APIModel):
+    """Public registration. Role is always assigned by the server as user."""
+
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     full_name: str | None = Field(default=None, max_length=120)
-    role: str = Field(default="user", pattern="^(user|admin)$")
+
+
+class AdminUserCreate(APIModel):
+    """Account created by an existing administrator."""
+
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str | None = Field(default=None, max_length=120)
+    role: str = Field(default="user", pattern=ROLE_PATTERN)
 
 
 class UserUpdate(APIModel):
     email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=120)
     is_active: bool | None = None
-    role: str | None = Field(default=None, pattern="^(user|admin)$")
+    role: str | None = Field(default=None, pattern=ROLE_PATTERN)
 
 
 class UserPublic(APIModel):

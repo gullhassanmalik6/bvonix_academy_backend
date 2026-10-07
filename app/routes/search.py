@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Query
 from typing import Literal
 
 from app.core.auth import get_current_user
+from app.core.permissions import is_management
 from app.core.dependencies import (
     get_course_repository,
     get_student_repository,
@@ -74,8 +75,8 @@ async def search(
                 if len([r for r in all_results if r.type == "course"]) >= limit:
                     break
     
-    # Search students
-    if "student" in search_types:
+    # Student and user records are management data.
+    if "student" in search_types and is_management(current_user.role):
         students = await student_repo.list(skip=0, limit=limit * 2)
         for student in students:
             # Get user info for student
@@ -91,8 +92,7 @@ async def search(
                 if len([r for r in all_results if r.type == "student"]) >= limit:
                     break
     
-    # Search users
-    if "user" in search_types:
+    if "user" in search_types and is_management(current_user.role):
         users = await user_repo.list(skip=0, limit=limit * 2)
         for user in users:
             if (query_lower in user.email.lower() or 

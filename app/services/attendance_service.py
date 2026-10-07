@@ -7,6 +7,7 @@ from app.repositories.scholarship_repository import ScholarshipRepository
 from app.services.scholarship_service import ScholarshipService
 from app.schemas.attendance import AttendanceCreate, AttendanceUpdate
 from app.models.attendance import Attendance
+from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import NotFoundError
 
 
@@ -16,10 +17,13 @@ class AttendanceService:
         attendance_repo: AttendanceRepository,
         scholarship_repo: ScholarshipRepository | None = None,
         scholarship_service: ScholarshipService | None = None,
+        *,
+        audit: AuditService | None = None,
     ) -> None:
         self._attendances = attendance_repo
         self._scholarships = scholarship_repo
         self._scholarship_service = scholarship_service
+        self._audit = audit
 
     async def create_attendance(self, payload: AttendanceCreate) -> Attendance:
         """Create attendance and check scholarships."""
@@ -64,6 +68,13 @@ class AttendanceService:
                     # Don't fail attendance creation if scholarship check fails
                     pass
         
+        await write_audit(
+            self._audit,
+            action="attendance.create",
+            entity_type="attendance",
+            entity_id=attendance.id,
+            current=attendance,
+        )
         return attendance
 
     async def get_attendance(self, attendance_id: str) -> Attendance:
@@ -115,6 +126,14 @@ class AttendanceService:
                 except Exception:
                     pass
         
+        await write_audit(
+            self._audit,
+            action="attendance.update",
+            entity_type="attendance",
+            entity_id=updated.id,
+            previous=attendance,
+            current=updated,
+        )
         return updated
 
     async def get_by_student_and_course(self, student_id: str, course_id: str) -> list[Attendance]:

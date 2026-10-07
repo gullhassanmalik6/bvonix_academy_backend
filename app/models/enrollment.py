@@ -42,6 +42,7 @@ class Enrollment:
     verified_by: str | None  # Admin user ID who verified
     created_at: datetime
     updated_at: datetime
+    review_state: str | None = None
 
     @staticmethod
     def now_utc() -> datetime:

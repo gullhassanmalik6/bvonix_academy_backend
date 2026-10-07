@@ -14,32 +14,14 @@ class AuthService:
     def __init__(self, user_repo: UserRepository) -> None:
         self._users = user_repo
 
-    async def register(self, payload: UserCreate, admin_secret: str | None = None) -> User:
-        """
-        Register a new user.
-        
-        Regular users are always created with role="user".
-        To create an admin, provide the admin_secret from environment.
-        """
-        # Security: Only allow admin registration with secret key
-        role = "user"
-        if payload.role == "admin":
-            from app.core.config import get_settings
-            settings = get_settings()
-            admin_secret_env = getattr(settings, "admin_secret", None)
-            
-            if admin_secret and admin_secret_env and admin_secret == admin_secret_env:
-                role = "admin"
-            else:
-                # Ignore admin role if no valid secret provided
-                role = "user"
-        
+    async def register(self, payload: UserCreate) -> User:
+        """Register a student account. Public registration cannot choose a role."""
         try:
             return await self._users.create_user(
                 email=payload.email,
                 full_name=payload.full_name,
                 hashed_password=hash_password(payload.password),
-                role=role,
+                role="user",
             )
         except DuplicateKeyError as e:
             # Convert MongoDB duplicate key error to our ConflictError
@@ -55,5 +37,7 @@ class AuthService:
         user = await self._users.get_by_email(payload.email)
         if user is None or not verify_password(payload.password, user.hashed_password):
             raise UnauthorizedError("Invalid email or password")
+        if not user.is_active:
+            raise UnauthorizedError("Inactive user")
         return Token(access_token=create_access_token(subject=user.id))
 

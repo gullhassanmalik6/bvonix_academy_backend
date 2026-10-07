@@ -12,12 +12,14 @@ from pymongo.errors import DuplicateKeyError
 from app.models.student import Student
 from app.repositories.student_repository import StudentRepository
 from app.schemas.student import StudentCreate, StudentUpdate
+from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import ConflictError, NotFoundError
 
 
 class StudentService:
-    def __init__(self, student_repo: StudentRepository) -> None:
+    def __init__(self, student_repo: StudentRepository, *, audit: AuditService | None = None) -> None:
         self._students = student_repo
+        self._audit = audit
 
     async def get_student(self, student_id: str) -> Student:
         """Get a student by ID."""
@@ -104,3 +106,10 @@ class StudentService:
         """Delete a student."""
         student = await self.get_student(student_id)
         await self._students.delete(student_id)
+        await write_audit(
+            self._audit,
+            action="student.delete",
+            entity_type="student",
+            entity_id=student.id,
+            previous=student,
+        )

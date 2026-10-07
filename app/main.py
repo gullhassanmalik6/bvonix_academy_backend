@@ -17,6 +17,7 @@ from app.middleware.exception_handler import (
     validation_error_handler,
 )
 from app.repositories.announcement_repository import AnnouncementRepository
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.assignment_repository import AssignmentRepository, AssignmentSubmissionRepository
 from app.repositories.attendance_repository import AttendanceRepository
 from app.repositories.certificate_repository import CertificateRepository
@@ -34,6 +35,7 @@ from app.repositories.scholarship_repository import ScholarshipRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.user_repository import UserRepository
 from app.routes.api import router as api_router
+from app.routes.health import router as health_router
 from app.utils.exceptions import AppError
 from app.utils.logging_config import setup_logging
 
@@ -71,6 +73,7 @@ async def lifespan(app: FastAPI):
                 ForumPostRepository(mongodb.db).ensure_indexes(),
                 NotificationRepository(mongodb.db).ensure_indexes(),
                 CalendarEventRepository(mongodb.db).ensure_indexes(),
+                AuditLogRepository(mongodb.db).ensure_indexes(),
                 return_exceptions=True  # Don't fail if one index creation fails
             )
             logger.info("MongoDB indexes created successfully")
@@ -100,7 +103,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         description="BvoniX Academy API - Backend for the academy platform",
-        version="1.0.0",
+        version=settings.app_version,
         lifespan=lifespan,
     )
     
@@ -113,7 +116,9 @@ def create_app() -> FastAPI:
     app.add_exception_handler(DuplicateKeyError, duplicate_key_error_handler)
     app.add_exception_handler(Exception, generic_exception_handler)
     
-    # Include routers
+    # Include routers. Liveness and readiness stay at /health/* .
+    # /api/health remains the existing status check.
+    app.include_router(health_router)
     app.include_router(api_router, prefix=settings.api_prefix)
     
     # Mount static files for uploads
@@ -131,7 +136,7 @@ def create_app() -> FastAPI:
         """Root endpoint with API information."""
         return {
             "message": "Welcome to BvoniX Academy API",
-            "version": "1.0.0",
+            "version": settings.app_version,
             "docs": "/docs",
             "health": f"{settings.api_prefix}/health",
         }
