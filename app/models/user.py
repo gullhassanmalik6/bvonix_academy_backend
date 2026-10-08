@@ -20,6 +20,8 @@ class User:
     is_active: bool
     role: str  # user, academic_manager, admin, or super_admin
     created_at: datetime
+    archived_at: datetime | None = None
+    archived_by: str | None = None
 
     @staticmethod
     def now_utc() -> datetime:

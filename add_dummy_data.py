@@ -14,9 +14,8 @@ This script adds:
 import asyncio
 import random
 from datetime import datetime, timedelta, timezone
-from motor.motor_asyncio import AsyncIOMotorClient
-
 from app.core.config import get_settings
+from app.db.mongodb import make_client
 from app.core.security import hash_password
 from app.repositories.user_repository import UserRepository
 from app.repositories.instructor_repository import InstructorRepository
@@ -455,7 +454,7 @@ async def add_dummy_data():
     settings = get_settings()
     
     # Connect to MongoDB
-    client = AsyncIOMotorClient(settings.mongodb_uri)
+    client = make_client(settings)
     db = client[settings.mongodb_db]
     
     try:

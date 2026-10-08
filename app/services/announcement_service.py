@@ -36,6 +36,16 @@ class AnnouncementService:
             raise NotFoundError("Announcement not found")
         return announcement
 
+    async def list_announcements(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        course_id: str | None = None,
+    ) -> tuple[list[Announcement], int]:
+        """Page announcements in MongoDB. No course id keeps system-wide rows."""
+        return await self._announcements.list_page(skip=skip, limit=limit, course_id=course_id)
+
     async def get_course_announcements(
         self,
         course_id: str | None,

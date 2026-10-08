@@ -7,10 +7,10 @@ This script removes enrollments for students with emails matching:
 """
 
 import asyncio
-from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 
 from app.core.config import get_settings
+from app.db.mongodb import make_client
 from app.repositories.user_repository import UserRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.enrollment_repository import EnrollmentRepository
@@ -22,7 +22,7 @@ from app.repositories.certificate_repository import CertificateRepository
 async def remove_dummy_enrollments():
     """Remove dummy enrollments and related data."""
     settings = get_settings()
-    client = AsyncIOMotorClient(settings.mongodb_uri)
+    client = make_client(settings)
     db = client[settings.mongodb_db]
     
     try:

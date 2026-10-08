@@ -6,6 +6,7 @@ from app.db.mongodb import mongodb
 from app.repositories.announcement_repository import AnnouncementRepository
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.assignment_repository import AssignmentRepository, AssignmentSubmissionRepository
+from app.repositories.attendance_correction_repository import AttendanceCorrectionRepository
 from app.repositories.attendance_repository import AttendanceRepository
 from app.repositories.calendar_event_repository import CalendarEventRepository
 from app.repositories.notification_repository import NotificationRepository
@@ -19,12 +20,14 @@ from app.repositories.live_session_repository import LiveSessionRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.result_repository import ResultRepository
 from app.repositories.scholarship_repository import ScholarshipRepository
+from app.repositories.session_repository import SessionRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.user_repository import UserRepository
 from app.services.announcement_service import AnnouncementService
 from app.services.audit_service import AuditService
 from app.services.assignment_service import AssignmentService
 from app.services.auth_service import AuthService
+from app.services.attendance_correction_service import AttendanceCorrectionService
 from app.services.attendance_service import AttendanceService
 from app.services.calendar_event_service import CalendarEventService
 from app.services.notification_service import NotificationService
@@ -55,8 +58,15 @@ def get_student_repository() -> StudentRepository:
     return StudentRepository(mongodb.db)
 
 
-def get_auth_service(users: UserRepository = Depends(get_user_repository)) -> AuthService:
-    return AuthService(users)
+def get_session_repository() -> SessionRepository:
+    return SessionRepository(mongodb.db)
+
+
+def get_auth_service(
+    users: UserRepository = Depends(get_user_repository),
+    sessions: SessionRepository = Depends(get_session_repository),
+) -> AuthService:
+    return AuthService(users, sessions)
 
 
 def get_audit_repository() -> AuditLogRepository:
@@ -70,8 +80,9 @@ def get_audit_service(audits: AuditLogRepository = Depends(get_audit_repository)
 def get_user_service(
     users: UserRepository = Depends(get_user_repository),
     audit: AuditService = Depends(get_audit_service),
+    sessions: SessionRepository = Depends(get_session_repository),
 ) -> UserService:
-    return UserService(users, audit=audit)
+    return UserService(users, audit=audit, sessions=sessions)
 
 
 def get_course_service(courses: CourseRepository = Depends(get_course_repository)) -> CourseService:
@@ -80,8 +91,9 @@ def get_course_service(courses: CourseRepository = Depends(get_course_repository
 
 def get_instructor_service(
     instructors: InstructorRepository = Depends(get_instructor_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> InstructorService:
-    return InstructorService(instructors)
+    return InstructorService(instructors, audit=audit)
 
 
 def get_student_service(
@@ -169,6 +181,18 @@ def get_attendance_service(
     audit: AuditService = Depends(get_audit_service),
 ) -> AttendanceService:
     return AttendanceService(attendances, scholarships, scholarship_service, audit=audit)
+
+
+def get_attendance_correction_repository() -> AttendanceCorrectionRepository:
+    return AttendanceCorrectionRepository(mongodb.db)
+
+
+def get_attendance_correction_service(
+    corrections: AttendanceCorrectionRepository = Depends(get_attendance_correction_repository),
+    attendance: AttendanceService = Depends(get_attendance_service),
+    audit: AuditService = Depends(get_audit_service),
+) -> AttendanceCorrectionService:
+    return AttendanceCorrectionService(corrections, attendance, audit=audit)
 
 
 def get_course_material_repository() -> CourseMaterialRepository:

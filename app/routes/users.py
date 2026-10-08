@@ -29,11 +29,13 @@ router = APIRouter(dependencies=[Depends(capture_audit_request)])
 async def list_users(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
+    q: str | None = Query(default=None, max_length=80),
+    sort: str | None = Query(default=None, max_length=40),
     service: UserService = Depends(get_user_service),
     current_user: User = Depends(get_admin_user),
 ) -> PaginatedResponse[UserPublic]:
     """List all users (paginated). Admin only."""
-    users, total = await service.list_users(skip=skip, limit=limit)
+    users, total = await service.list_users(skip=skip, limit=limit, q=q, sort=sort)
     
     return PaginatedResponse(
         items=[
@@ -68,6 +70,7 @@ async def get_user(
         email=user.email,
         full_name=user.full_name,
         is_active=user.is_active,
+        role=user.role,
         created_at=user.created_at,
     )
 
@@ -93,6 +96,7 @@ async def update_user(
         email=user.email,
         full_name=user.full_name,
         is_active=user.is_active,
+        role=user.role,
         created_at=user.created_at,
     )
 
@@ -106,5 +110,10 @@ async def delete_user(
     """Delete a user."""
     existing = await service.get_user(user_id)
     assert_can_delete_user(current_user.role, existing.role)
-    await service.delete_user(user_id)
+    await service.delete_user(
+        user_id,
+        archived_by=current_user.id,
+        actor_role=current_user.role,
+        actor_id=current_user.id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

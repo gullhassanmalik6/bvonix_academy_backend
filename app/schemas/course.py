@@ -35,3 +35,39 @@ class CoursePublic(APIModel):
     is_published: bool
     created_at: datetime
     updated_at: datetime
+
+
+class CourseInstructorSummary(APIModel):
+    """Instructor facts safe to show before enrollment. No email or account id."""
+
+    name: str | None = None
+    specialization: str | None = None
+    bio: str | None = None
+    years_of_experience: int | None = None
+
+
+class CourseLessonSummary(APIModel):
+    """Published lesson title. File and video URLs stay on the enrolled course."""
+
+    title: str
+    description: str | None = None
+    material_type: str
+    order: int
+    duration_minutes: int | None = None
+    is_required: bool = False
+
+
+class CoursePracticalSummary(APIModel):
+    """Published assignment title and type. Instructions stay on the enrolled course."""
+
+    title: str
+    description: str
+    assignment_type: str
+
+
+class CourseDecisionPublic(APIModel):
+    instructor: CourseInstructorSummary | None = None
+    lessons: list[CourseLessonSummary]
+    lesson_total: int
+    practical_work: list[CoursePracticalSummary]
+    practical_total: int

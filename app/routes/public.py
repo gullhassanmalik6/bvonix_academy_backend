@@ -9,19 +9,26 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import (
+    get_assignment_repository,
+    get_course_material_repository,
     get_course_repository,
     get_course_service,
     get_enrollment_repository,
+    get_instructor_repository,
     get_student_repository,
     get_user_repository,
 )
+from app.repositories.assignment_repository import AssignmentRepository
+from app.repositories.course_material_repository import CourseMaterialRepository
 from app.repositories.course_repository import CourseRepository
 from app.repositories.enrollment_repository import EnrollmentRepository
+from app.repositories.instructor_repository import InstructorRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.common import PaginatedResponse
-from app.schemas.course import CoursePublic
+from app.schemas.course import CourseDecisionPublic, CoursePublic
 from app.schemas.student_card import StudentCardVerifyResponse
+from app.services.course_decision import build_course_decision
 from app.services.course_service import CourseService
 from app.utils.exceptions import NotFoundError
 
@@ -77,6 +84,26 @@ async def get_public_course(
         is_published=course.is_published,
         created_at=course.created_at,
         updated_at=course.updated_at,
+    )
+
+
+@router.get("/courses/{course_id}/decision", response_model=CourseDecisionPublic)
+async def get_public_course_decision(
+    course_id: str,
+    service: CourseService = Depends(get_course_service),
+    instructors: InstructorRepository = Depends(get_instructor_repository),
+    users: UserRepository = Depends(get_user_repository),
+    materials: CourseMaterialRepository = Depends(get_course_material_repository),
+    assignments: AssignmentRepository = Depends(get_assignment_repository),
+) -> CourseDecisionPublic:
+    """Published lesson titles, practical work, and instructor name. No file URLs."""
+    course = await service.get_course(course_id)
+    return await build_course_decision(
+        course,
+        instructors=instructors,
+        users=users,
+        materials=materials,
+        assignments=assignments,
     )
 
 

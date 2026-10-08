@@ -9,18 +9,27 @@ from __future__ import annotations
 
 from pymongo.errors import DuplicateKeyError
 
+from app.core.permissions import assert_can_delete_user, assert_can_purge
 from app.core.security import hash_password
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import AdminUserCreate, UserUpdate
+from app.services.archive_actions import archive_record, purge_record
 from app.services.audit_service import AuditService, write_audit
-from app.utils.exceptions import ConflictError, NotFoundError
+from app.utils.exceptions import ConflictError, ForbiddenError, NotFoundError
 
 
 class UserService:
-    def __init__(self, user_repo: UserRepository, *, audit: AuditService | None = None) -> None:
+    def __init__(
+        self,
+        user_repo: UserRepository,
+        *,
+        audit: AuditService | None = None,
+        sessions: object | None = None,
+    ) -> None:
         self._users = user_repo
         self._audit = audit
+        self._sessions = sessions
 
     async def get_user(self, user_id: str) -> User:
         """Get a user by ID."""
@@ -29,11 +38,15 @@ class UserService:
             raise NotFoundError("User not found")
         return user
 
-    async def list_users(self, skip: int = 0, limit: int = 100) -> tuple[list[User], int]:
-        """List users with pagination."""
-        users = await self._users.list(skip=skip, limit=limit)
-        total = await self._users.count()
-        return users, total
+    async def list_users(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        q: str | None = None,
+        sort: str | None = None,
+    ) -> tuple[list[User], int]:
+        """List users with search and pagination applied in MongoDB."""
+        return await self._users.list_page(skip=skip, limit=limit, q=q, sort=sort)
 
     async def create_user(self, payload: AdminUserCreate) -> User:
         """Create an account from an authorized administrator."""
@@ -78,6 +91,8 @@ class UserService:
                 raise NotFoundError("User not found")
         except DuplicateKeyError as e:
             raise ConflictError("Email already exists") from e
+        if payload.role is not None or payload.is_active is False:
+            await self._revoke_sessions(updated_user.id)
         if payload.role is not None or payload.is_active is not None:
             await write_audit(
                 self._audit,
@@ -94,14 +109,49 @@ class UserService:
             )
         return updated_user
 
-    async def delete_user(self, user_id: str) -> None:
-        """Delete a user."""
+    async def _revoke_sessions(self, user_id: str) -> None:
+        if self._sessions is not None:
+            await self._sessions.revoke_all_for_user(user_id)
+
+    async def delete_user(
+        self,
+        user_id: str,
+        *,
+        archived_by: str | None = None,
+        actor_role: str | None = None,
+        actor_id: str | None = None,
+    ) -> None:
+        """Archive a user. The account row stays for audit."""
         user = await self.get_user(user_id)
-        await self._users.delete(user_id)
-        await write_audit(
-            self._audit,
+        if actor_id != user.id:
+            if actor_role is None:
+                raise ForbiddenError("Admin access required")
+            assert_can_delete_user(actor_role, user.role)
+        elif actor_role is None:
+            raise ForbiddenError("Admin access required")
+        await archive_record(
+            self._users,
+            user,
+            archived_by=archived_by,
+            deactivate=True,
+            audit=self._audit,
             action="user.delete",
             entity_type="user",
-            entity_id=user.id,
-            previous=user,
+            not_found="User not found",
+        )
+        await self._revoke_sessions(user.id)
+
+    async def purge_user(self, user_id: str, *, actor_role: str, actor_id: str) -> None:
+        """Permanently remove a user. Super admin only."""
+        assert_can_purge(actor_role)
+        user = await self.get_user(user_id)
+        await self._revoke_sessions(user.id)
+        await purge_record(
+            self._users,
+            user,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            audit=self._audit,
+            entity_type="user",
+            not_found="User not found",
         )

@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING
 
 from app.models.instructor import Instructor
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -30,6 +31,8 @@ class InstructorRepository(BaseRepository[Instructor]):
             is_active=doc.get("is_active", True),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
 
     async def get_by_id(self, instructor_id: str) -> Instructor | None:
@@ -46,7 +49,7 @@ class InstructorRepository(BaseRepository[Instructor]):
             user_oid = ObjectId(user_id)
         except Exception:
             return None
-        doc = await self.collection.find_one({"user_id": user_oid})
+        doc = await self.collection.find_one(with_active({"user_id": user_oid}))
         return self._to_model(doc) if doc else None
 
     async def create_instructor(

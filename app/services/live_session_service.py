@@ -35,6 +35,16 @@ class LiveSessionService:
             raise NotFoundError("Live session not found")
         return session
 
+    async def list_course_sessions(
+        self,
+        course_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[LiveSession], int]:
+        """Page sessions for one course without loading the whole set into Python."""
+        return await self._sessions.list_page(course_id, skip=skip, limit=limit)
+
     async def get_course_sessions(
         self,
         course_id: str,

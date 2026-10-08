@@ -29,11 +29,13 @@ router = APIRouter(dependencies=[Depends(capture_audit_request)])
 async def list_students(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
+    q: str | None = Query(default=None, max_length=80),
+    sort: str | None = Query(default=None, max_length=40),
     service: StudentService = Depends(get_student_service),
     current_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[StudentPublic]:
     """List all students (paginated). Management only."""
-    students, total = await service.list_students(skip=skip, limit=limit)
+    students, total = await service.list_students(skip=skip, limit=limit, q=q, sort=sort)
     
     return PaginatedResponse(
         items=[
@@ -184,5 +186,9 @@ async def delete_student(
     current_user: User = Depends(get_admin_user),
 ) -> Response:
     """Delete a student."""
-    await service.delete_student(student_id)
+    await service.delete_student(
+        student_id,
+        archived_by=current_user.id,
+        actor_role=current_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

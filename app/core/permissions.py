@@ -88,3 +88,9 @@ def assert_can_delete_user(actor_role: str, target_role: str) -> None:
         raise ForbiddenError("Admin access required")
     if target_role == ROLE_SUPER_ADMIN and not is_super_admin(actor_role):
         raise ForbiddenError("Super admin access required")
+
+
+def assert_can_purge(actor_role: str) -> None:
+    """Permanent deletion is a super-admin action."""
+    if not is_super_admin(actor_role):
+        raise ForbiddenError("Super admin access required")

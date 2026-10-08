@@ -38,6 +38,22 @@ class CourseMaterialRepository(BaseRepository[CourseMaterial]):
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
         )
 
+    async def list_page(
+        self,
+        course_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        published_only: bool = False,
+    ) -> tuple[list[CourseMaterial], int]:
+        try:
+            query: dict[str, Any] = {"course_id": ObjectId(course_id)}
+        except Exception:
+            return [], 0
+        if published_only:
+            query["is_published"] = True
+        return await self.find_page(query, skip=skip, limit=limit, sort=[("order", ASCENDING), ("created_at", ASCENDING)])
+
     async def get_by_course(self, course_id: str, published_only: bool = True) -> list[CourseMaterial]:
         """Get all materials for a course."""
         try:

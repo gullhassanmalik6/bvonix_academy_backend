@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.permissions import can_manage_scholarships
 from app.repositories.scholarship_repository import ScholarshipRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.course_repository import CourseRepository
 from app.services.notification_service import NotificationService
 from app.schemas.scholarship import ScholarshipCreate, ScholarshipUpdate
 from app.models.scholarship import Scholarship
+from app.services.archive_actions import archive_record, purge_record
 from app.services.audit_service import AuditService, write_audit
-from app.utils.exceptions import NotFoundError
+from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
 class ScholarshipService:
@@ -63,22 +65,18 @@ class ScholarshipService:
         limit: int = 100,
         student_id: str | None = None,
         status: str | None = None,
+        q: str | None = None,
+        sort: str | None = None,
     ) -> tuple[list[Scholarship], int]:
-        """List scholarships with optional filters."""
-        if student_id:
-            scholarships = await self._scholarships.get_by_student(student_id, status)
-        else:
-            # Get all scholarships (for admin)
-            all_scholarships = await self._scholarships.list(skip=0, limit=10000)
-            scholarships = all_scholarships
-        
-        # Filter by status if provided
-        if status:
-            scholarships = [s for s in scholarships if s.status == status]
-        
-        total = len(scholarships)
-        paginated = scholarships[skip:skip + limit]
-        return paginated, total
+        """List scholarships with filters applied in MongoDB."""
+        return await self._scholarships.list_page(
+            skip=skip,
+            limit=limit,
+            student_id=student_id,
+            status=status,
+            q=q,
+            sort=sort,
+        )
 
     async def get_student_scholarships(self, student_id: str) -> list[Scholarship]:
         """Get all scholarships for a student."""
@@ -157,18 +155,39 @@ class ScholarshipService:
         )
         return terminated
 
-    async def delete_scholarship(self, scholarship_id: str) -> None:
-        """Delete a scholarship."""
+    async def delete_scholarship(
+        self,
+        scholarship_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive a scholarship. Termination history is a separate action."""
+        if not can_manage_scholarships(actor_role):
+            raise ForbiddenError("You cannot manage scholarships")
         scholarship = await self.get_scholarship(scholarship_id)
-        deleted = await self._scholarships.delete(scholarship_id)
-        if not deleted:
-            raise NotFoundError("Scholarship not found")
-        await write_audit(
-            self._audit,
+        await archive_record(
+            self._scholarships,
+            scholarship,
+            archived_by=archived_by,
+            deactivate=False,
+            audit=self._audit,
             action="scholarship.delete",
             entity_type="scholarship",
-            entity_id=scholarship.id,
-            previous=scholarship,
+            not_found="Scholarship not found",
+        )
+
+    async def purge_scholarship(self, scholarship_id: str, *, actor_role: str, actor_id: str) -> None:
+        """Permanently remove a scholarship. Super admin only."""
+        scholarship = await self.get_scholarship(scholarship_id)
+        await purge_record(
+            self._scholarships,
+            scholarship,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            audit=self._audit,
+            entity_type="scholarship",
+            not_found="Scholarship not found",
         )
 
     async def check_and_update_attendance(

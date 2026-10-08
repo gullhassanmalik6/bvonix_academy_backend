@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import ssl
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 from app.core.config import get_settings
+from app.db.mongo_tls import mongo_client_options
 
 
 class MongoDB:
@@ -24,61 +24,33 @@ class MongoDB:
             raise RuntimeError("MongoDB not initialized. Call connect() on startup.")
         return self._db
 
-    async def connect(self) -> None:
+    async def connect(self) -> bool:
+        """Create the client and report whether MongoDB answered.
+
+        A failed ping does not raise. Production startup decides whether that
+        failure must stop the process.
+        """
         settings = get_settings()
         import logging
         logger = logging.getLogger(__name__)
-        
-        # For MongoDB Atlas (mongodb+srv://), ensure proper SSL/TLS handling
-        # Python 3.13 compatibility: use tlsAllowInvalidCertificates as workaround
-        connection_options = {
-            "serverSelectionTimeoutMS": 5000,  # Reduced to 5 seconds to fail faster
-            "connectTimeoutMS": 5000,
-        }
-        
-        # Check if it's an Atlas connection (mongodb+srv://)
-        if "mongodb+srv://" in settings.mongodb_uri:
-            # Ensure tlsAllowInvalidCertificates is in the URI (for Python 3.13 compatibility)
-            uri = settings.mongodb_uri
-            if "tlsAllowInvalidCertificates" not in uri:
-                # Add the parameter if not present
-                if "?" in uri:
-                    uri += "&tlsAllowInvalidCertificates=true"
-                else:
-                    uri += "?tlsAllowInvalidCertificates=true"
-        else:
-            uri = settings.mongodb_uri
-        
-        # Create client - this is non-blocking, it just creates the client object
-        # The actual connection happens lazily on first operation
+
         try:
-            self._client = AsyncIOMotorClient(
-                uri,
-                **connection_options
-            )
-            # Set db reference immediately - this doesn't require a connection
+            self._client = make_client(settings)
             self._db = self._client[settings.mongodb_db]
-            logger.info("MongoDB client initialized. Connection will be established on first operation.")
-            
-            # Try a quick ping test, but don't block if it fails
-            # Use asyncio.wait_for to ensure we don't hang
-            import asyncio
-            try:
-                await asyncio.wait_for(
-                    self._client.admin.command('ping'),
-                    timeout=3.0  # 3 second timeout for ping
-                )
-                logger.info("MongoDB connection test successful")
-            except asyncio.TimeoutError:
-                logger.warning("MongoDB ping timed out. Connection may work on first operation.")
-            except Exception as e:
-                logger.warning(f"MongoDB ping failed: {e}. Connection may work on first operation.")
-                # Don't raise - allow server to start
         except Exception as e:
-            logger.error(f"Failed to create MongoDB client: {e}")
-            # Create a dummy client to prevent "not initialized" errors
-            # This allows server to start, but DB operations will fail with better error messages
-            raise RuntimeError(f"MongoDB client creation failed: {e}")
+            logger.error("Failed to create MongoDB client: %s", e)
+            raise RuntimeError(f"MongoDB client creation failed: {e}") from e
+
+        import asyncio
+
+        try:
+            await asyncio.wait_for(self._client.admin.command("ping"), timeout=3.0)
+            logger.info("MongoDB connection test successful")
+            return True
+        except Exception as e:
+            detail = str(e).strip() or type(e).__name__
+            logger.error("MongoDB did not respond during startup: %s", detail)
+            return False
 
     async def ping(self) -> bool:
         """Return whether the database answers. Does not raise."""
@@ -97,6 +69,11 @@ class MongoDB:
             self._client.close()
         self._client = None
         self._db = None
+
+
+def make_client(settings) -> AsyncIOMotorClient:
+    """Open a Motor client with the shared TLS policy."""
+    return AsyncIOMotorClient(settings.mongodb_uri, **mongo_client_options(settings))
 
 
 mongodb = MongoDB()

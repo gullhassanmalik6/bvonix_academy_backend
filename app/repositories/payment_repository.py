@@ -4,11 +4,21 @@ from datetime import datetime, timezone
 from typing import Any
 
 from bson import ObjectId
-from pymongo import ASCENDING
+from pymongo import ASCENDING, DESCENDING
 
 from app.models.payment import Payment
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
+from app.repositories.listing import sort_pairs, text_clause
 from app.utils.helpers import oid_str
+
+PAYMENT_SORTS = {
+    "created_at": [("created_at", ASCENDING)],
+    "-created_at": [("created_at", DESCENDING)],
+    "amount": [("amount", ASCENDING)],
+    "-amount": [("amount", DESCENDING)],
+    "payment_status": [("payment_status", ASCENDING), ("created_at", DESCENDING)],
+}
 
 
 class PaymentRepository(BaseRepository[Payment]):
@@ -19,6 +29,9 @@ class PaymentRepository(BaseRepository[Payment]):
         await self.collection.create_index([("course_id", ASCENDING)])
         await self.collection.create_index([("payment_status", ASCENDING)])
         await self.collection.create_index([("transaction_id", ASCENDING)])
+        await self.collection.create_index([("created_at", DESCENDING)])
+        await self.collection.create_index([("payment_status", ASCENDING), ("created_at", DESCENDING)])
+        await self.collection.create_index([("student_id", ASCENDING), ("created_at", DESCENDING)])
 
     def _to_model(self, doc: dict[str, Any]) -> Payment:
         return Payment(
@@ -40,6 +53,45 @@ class PaymentRepository(BaseRepository[Payment]):
             created_by=oid_str(doc["created_by"]) if doc.get("created_by") else None,
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
+        )
+
+    async def list_page(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        student_id: str | None = None,
+        course_id: str | None = None,
+        payment_status: str | None = None,
+        q: str | None = None,
+        sort: str | None = None,
+    ) -> tuple[list[Payment], int]:
+        """Filter, search, sort, and page payments in MongoDB."""
+        query: dict[str, Any] = {}
+        if student_id:
+            try:
+                query["student_id"] = ObjectId(student_id)
+            except Exception:
+                return [], 0
+        if course_id:
+            try:
+                query["course_id"] = ObjectId(course_id)
+            except Exception:
+                return [], 0
+        if payment_status:
+            query["payment_status"] = payment_status
+        if q and q.strip():
+            query["$or"] = text_clause(
+                q,
+                ("invoice_number", "transaction_id", "notes", "payment_method"),
+            )["$or"]
+        return await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=sort_pairs(sort, allowed=PAYMENT_SORTS, default="-created_at"),
         )
 
     async def get_by_student(self, student_id: str) -> list[Payment]:
@@ -49,7 +101,7 @@ class PaymentRepository(BaseRepository[Payment]):
         except Exception:
             return []
         
-        cursor = self.collection.find({"student_id": student_oid}).sort("created_at", -1)
+        cursor = self.collection.find(with_active({"student_id": student_oid})).sort("created_at", -1)
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 
@@ -60,7 +112,7 @@ class PaymentRepository(BaseRepository[Payment]):
         except Exception:
             return []
         
-        cursor = self.collection.find({"course_id": course_oid}).sort("created_at", -1)
+        cursor = self.collection.find(with_active({"course_id": course_oid})).sort("created_at", -1)
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 

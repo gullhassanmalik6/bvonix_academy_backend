@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.core.permissions import is_admin
 from app.repositories.attendance_repository import AttendanceRepository
 from app.repositories.scholarship_repository import ScholarshipRepository
 from app.services.scholarship_service import ScholarshipService
 from app.schemas.attendance import AttendanceCreate, AttendanceUpdate
 from app.models.attendance import Attendance
+from app.services.archive_actions import archive_record, purge_record
 from app.services.audit_service import AuditService, write_audit
-from app.utils.exceptions import NotFoundError
+from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
 class AttendanceService:
@@ -136,6 +138,18 @@ class AttendanceService:
         )
         return updated
 
+    async def apply_corrected_status(self, attendance_id: str, status: str) -> Attendance:
+        """Apply an approved correction. The existing update path keeps scholarship checks."""
+        updated = await self.update_attendance(attendance_id, AttendanceUpdate(status=status))
+        excused = status == "excused"
+        if updated.is_excused == excused:
+            return updated
+        fixed = await self._attendances.update(
+            attendance_id,
+            {"is_excused": excused, "updated_at": datetime.now()},
+        )
+        return fixed or updated
+
     async def get_by_student_and_course(self, student_id: str, course_id: str) -> list[Attendance]:
         """Get all attendance records for a student in a course."""
         return await self._attendances.get_by_student_and_course(student_id, course_id)
@@ -157,9 +171,37 @@ class AttendanceService:
             raise NotFoundError("Attendance not found")
         return updated
 
-    async def delete_attendance(self, attendance_id: str) -> None:
-        """Delete attendance."""
+    async def delete_attendance(
+        self,
+        attendance_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive an attendance mark. The row stays for audit."""
+        if not is_admin(actor_role):
+            raise ForbiddenError("Admin access required")
         attendance = await self.get_attendance(attendance_id)
-        deleted = await self._attendances.delete(attendance_id)
-        if not deleted:
-            raise NotFoundError("Attendance not found")
+        await archive_record(
+            self._attendances,
+            attendance,
+            archived_by=archived_by,
+            deactivate=False,
+            audit=self._audit,
+            action="attendance.delete",
+            entity_type="attendance",
+            not_found="Attendance not found",
+        )
+
+    async def purge_attendance(self, attendance_id: str, *, actor_role: str, actor_id: str) -> None:
+        """Permanently remove an attendance mark. Super admin only."""
+        attendance = await self.get_attendance(attendance_id)
+        await purge_record(
+            self._attendances,
+            attendance,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            audit=self._audit,
+            entity_type="attendance",
+            not_found="Attendance not found",
+        )

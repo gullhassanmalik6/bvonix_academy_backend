@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from pymongo.errors import DuplicateKeyError
 
+from app.core.permissions import is_admin
 from app.models.student import Student
 from app.repositories.student_repository import StudentRepository
 from app.schemas.student import StudentCreate, StudentUpdate
-from app.services.audit_service import AuditService, write_audit
-from app.utils.exceptions import ConflictError, NotFoundError
+from app.services.archive_actions import archive_record, purge_record
+from app.services.audit_service import AuditService
+from app.utils.exceptions import ConflictError, ForbiddenError, NotFoundError
 
 
 class StudentService:
@@ -35,11 +37,15 @@ class StudentService:
             raise NotFoundError("Student not found")
         return student
 
-    async def list_students(self, skip: int = 0, limit: int = 100) -> tuple[list[Student], int]:
-        """List all students with pagination."""
-        students = await self._students.list(skip=skip, limit=limit)
-        total = await self._students.count()
-        return students, total
+    async def list_students(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        q: str | None = None,
+        sort: str | None = None,
+    ) -> tuple[list[Student], int]:
+        """List students with search and pagination applied in MongoDB."""
+        return await self._students.list_page(skip=skip, limit=limit, q=q, sort=sort)
 
     async def create_student(self, payload: StudentCreate) -> Student:
         """Create a new student."""
@@ -102,14 +108,37 @@ class StudentService:
             raise NotFoundError("Student not found")
         return updated_student
 
-    async def delete_student(self, student_id: str) -> None:
-        """Delete a student."""
+    async def delete_student(
+        self,
+        student_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive a student profile. The row stays for audit."""
+        if not is_admin(actor_role):
+            raise ForbiddenError("Admin access required")
         student = await self.get_student(student_id)
-        await self._students.delete(student_id)
-        await write_audit(
-            self._audit,
+        await archive_record(
+            self._students,
+            student,
+            archived_by=archived_by,
+            deactivate=True,
+            audit=self._audit,
             action="student.delete",
             entity_type="student",
-            entity_id=student.id,
-            previous=student,
+            not_found="Student not found",
+        )
+
+    async def purge_student(self, student_id: str, *, actor_role: str, actor_id: str) -> None:
+        """Permanently remove a student profile. Super admin only."""
+        student = await self.get_student(student_id)
+        await purge_record(
+            self._students,
+            student,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            audit=self._audit,
+            entity_type="student",
+            not_found="Student not found",
         )

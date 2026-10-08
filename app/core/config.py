@@ -24,10 +24,18 @@ class Settings(BaseSettings):
 
     mongodb_uri: str = Field(default="mongodb://localhost:27017", alias="MONGODB_URI")
     mongodb_db: str = Field(default="bvonix_academy", alias="MONGODB_DB")
+    # Development-only. Ignored unless APP_ENV=development. Production refuses this flag.
+    mongodb_tls_allow_invalid_certificates: bool = Field(
+        default=False,
+        alias="MONGODB_TLS_ALLOW_INVALID_CERTIFICATES",
+    )
 
     jwt_secret: str = Field(default="CHANGE_ME", alias="JWT_SECRET")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
-    access_token_expire_minutes: int = Field(default=60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
+    jwt_issuer: str = Field(default="bvonix-academy", alias="JWT_ISSUER")
+    jwt_audience: str = Field(default="bvonix-academy-api", alias="JWT_AUDIENCE")
+    access_token_expire_minutes: int = Field(default=15, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
+    refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
 
     allowed_origins: str = Field(default="http://localhost:5173", alias="ALLOWED_ORIGINS")
 

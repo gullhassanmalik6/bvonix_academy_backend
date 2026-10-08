@@ -25,6 +25,7 @@ from app.core.permissions import assert_can_delete_user, assert_user_admin_updat
 from app.core.dependencies import (
     get_announcement_service,
     get_assignment_service,
+    get_attendance_correction_service,
     get_attendance_service,
     get_course_material_service,
     get_course_repository,
@@ -66,6 +67,11 @@ from app.schemas.assignment import (
     AssignmentUpdate,
 )
 from app.schemas.attendance import AttendanceCreate, AttendancePublic, AttendanceUpdate
+from app.schemas.attendance_correction import (
+    AttendanceCorrectionDecision,
+    AttendanceCorrectionPublic,
+    correction_to_public,
+)
 from app.schemas.course import CourseCreate, CoursePublic, CourseUpdate
 from app.schemas.course_material import CourseMaterialCreate, CourseMaterialPublic, CourseMaterialUpdate
 from app.schemas.instructor import InstructorCreate, InstructorPublic, InstructorUpdate
@@ -85,6 +91,7 @@ from app.schemas.user import AdminUserCreate, UserPublic, UserUpdate
 from app.services.announcement_service import AnnouncementService
 from app.services.audit_service import AuditService, snapshot
 from app.services.assignment_service import AssignmentService
+from app.services.attendance_correction_service import AttendanceCorrectionService
 from app.services.attendance_service import AttendanceService
 from app.services.course_material_service import CourseMaterialService
 from app.services.course_service import CourseService
@@ -216,11 +223,13 @@ async def admin_create_user(
 async def admin_list_users(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
+    q: str | None = Query(default=None, max_length=80),
+    sort: str | None = Query(default=None, max_length=40),
     service: UserService = Depends(get_user_service),
     admin_user: User = Depends(get_admin_user),
 ) -> PaginatedResponse[UserPublic]:
     """List all users (admin only)."""
-    users, total = await service.list_users(skip=skip, limit=limit)
+    users, total = await service.list_users(skip=skip, limit=limit, q=q, sort=sort)
     
     return PaginatedResponse(
         items=[
@@ -275,7 +284,12 @@ async def admin_delete_user(
     """Delete a user (admin only). Super admin accounts require a super admin."""
     existing = await service.get_user(user_id)
     assert_can_delete_user(admin_user.role, existing.role)
-    await service.delete_user(user_id)
+    await service.delete_user(
+        user_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+        actor_id=admin_user.id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -359,7 +373,11 @@ async def admin_delete_instructor(
     admin_user: User = Depends(get_admin_user),
 ) -> Response:
     """Delete an instructor (admin only)."""
-    await service.delete_instructor(instructor_id)
+    await service.delete_instructor(
+        instructor_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -369,11 +387,13 @@ async def admin_delete_instructor(
 async def admin_list_students(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
+    q: str | None = Query(default=None, max_length=80),
+    sort: str | None = Query(default=None, max_length=40),
     service: StudentService = Depends(get_student_service),
     admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[StudentPublic]:
     """List all students (admin only)."""
-    students, total = await service.list_students(skip=skip, limit=limit)
+    students, total = await service.list_students(skip=skip, limit=limit, q=q, sort=sort)
     
     return PaginatedResponse(
         items=[
@@ -440,7 +460,11 @@ async def admin_delete_student(
     admin_user: User = Depends(get_admin_user),
 ) -> Response:
     """Delete a student (admin only)."""
-    await service.delete_student(student_id)
+    await service.delete_student(
+        student_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -452,6 +476,8 @@ async def admin_list_scholarships(
     limit: int = Query(default=100, ge=1, le=100),
     student_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=80),
+    sort: str | None = Query(default=None, max_length=40),
     service: ScholarshipService = Depends(get_scholarship_service),
     admin_user: User = Depends(get_scholarship_admin),
 ) -> PaginatedResponse[ScholarshipPublic]:
@@ -461,6 +487,8 @@ async def admin_list_scholarships(
         limit=limit,
         student_id=student_id,
         status=status,
+        q=q,
+        sort=sort,
     )
     
     return PaginatedResponse(
@@ -592,7 +620,11 @@ async def admin_delete_scholarship(
     admin_user: User = Depends(get_scholarship_admin),
 ) -> Response:
     """Delete a scholarship (admin only)."""
-    await service.delete_scholarship(scholarship_id)
+    await service.delete_scholarship(
+        scholarship_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -647,6 +679,86 @@ async def admin_update_attendance(
         created_at=attendance.created_at,
         updated_at=attendance.updated_at,
     )
+
+
+@router.get("/attendance/corrections", response_model=PaginatedResponse[AttendanceCorrectionPublic])
+async def admin_list_attendance_corrections(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        pattern="^(requested|under_review|approved|rejected)$",
+    ),
+    open_only: bool = Query(default=False),
+    service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+    admin_user: User = Depends(get_management_user),
+) -> PaginatedResponse[AttendanceCorrectionPublic]:
+    """List attendance correction requests. Open requests are requested or under review."""
+    del admin_user
+    corrections, total = await service.list_corrections(
+        skip=skip,
+        limit=limit,
+        status=status_filter,
+        open_only=open_only,
+    )
+    return PaginatedResponse(
+        items=[correction_to_public(item) for item in corrections],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.post("/attendance/corrections/{correction_id}/review", response_model=AttendanceCorrectionPublic)
+async def admin_review_attendance_correction(
+    correction_id: str,
+    service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+    admin_user: User = Depends(get_management_user),
+) -> AttendanceCorrectionPublic:
+    """Move a requested correction to under review."""
+    correction = await service.start_review(
+        correction_id,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+    )
+    return correction_to_public(correction)
+
+
+@router.post("/attendance/corrections/{correction_id}/approve", response_model=AttendanceCorrectionPublic)
+async def admin_approve_attendance_correction(
+    correction_id: str,
+    payload: AttendanceCorrectionDecision | None = None,
+    service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+    admin_user: User = Depends(get_management_user),
+) -> AttendanceCorrectionPublic:
+    """Approve a correction that is under review and apply the new attendance mark."""
+    correction = await service.approve(
+        correction_id,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+        review_note=payload.review_note if payload else None,
+    )
+    return correction_to_public(correction)
+
+
+@router.post("/attendance/corrections/{correction_id}/reject", response_model=AttendanceCorrectionPublic)
+async def admin_reject_attendance_correction(
+    correction_id: str,
+    payload: AttendanceCorrectionDecision | None = None,
+    service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+    admin_user: User = Depends(get_management_user),
+) -> AttendanceCorrectionPublic:
+    """Reject a correction that is under review. The attendance mark stays unchanged."""
+    correction = await service.reject(
+        correction_id,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+        review_note=payload.review_note if payload else None,
+    )
+    return correction_to_public(correction)
+
+
 # ==================== Course Materials Management ====================
 
 @router.get("/courses/{course_id}/materials", response_model=PaginatedResponse[CourseMaterialPublic])
@@ -658,9 +770,7 @@ async def admin_list_materials(
     admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[CourseMaterialPublic]:
     """List all materials for a course (admin only)."""
-    materials = await service.get_course_materials(course_id, published_only=False)
-    total = len(materials)
-    paginated = materials[skip:skip + limit]
+    materials, total = await service.list_course_materials(course_id, skip=skip, limit=limit)
     
     return PaginatedResponse(
         items=[
@@ -681,7 +791,7 @@ async def admin_list_materials(
                 created_at=m.created_at,
                 updated_at=m.updated_at,
             )
-            for m in paginated
+            for m in materials
         ],
         total=total,
         skip=skip,
@@ -766,9 +876,7 @@ async def admin_list_assignments(
     admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[AssignmentPublic]:
     """List all assignments for a course (admin only)."""
-    assignments = await service.get_course_assignments(course_id, published_only=False)
-    total = len(assignments)
-    paginated = assignments[skip:skip + limit]
+    assignments, total = await service.list_course_assignments(course_id, skip=skip, limit=limit)
     
     return PaginatedResponse(
         items=[
@@ -786,7 +894,7 @@ async def admin_list_assignments(
                 created_at=a.created_at,
                 updated_at=a.updated_at,
             )
-            for a in paginated
+            for a in assignments
         ],
         total=total,
         skip=skip,
@@ -924,9 +1032,7 @@ async def admin_list_sessions(
     admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[LiveSessionPublic]:
     """List all sessions for a course (admin only)."""
-    sessions = await service.get_course_sessions(course_id)
-    total = len(sessions)
-    paginated = sessions[skip:skip + limit]
+    sessions, total = await service.list_course_sessions(course_id, skip=skip, limit=limit)
     
     return PaginatedResponse(
         items=[
@@ -949,7 +1055,7 @@ async def admin_list_sessions(
                 created_at=s.created_at,
                 updated_at=s.updated_at,
             )
-            for s in paginated
+            for s in sessions
         ],
         total=total,
         skip=skip,
@@ -1038,9 +1144,7 @@ async def admin_list_announcements(
     admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[AnnouncementPublic]:
     """List all announcements (admin only)."""
-    announcements = await service.get_course_announcements(course_id, published_only=False)
-    total = len(announcements)
-    paginated = announcements[skip:skip + limit]
+    announcements, total = await service.list_announcements(skip=skip, limit=limit, course_id=course_id)
     
     return PaginatedResponse(
         items=[
@@ -1057,7 +1161,7 @@ async def admin_list_announcements(
                 created_at=a.created_at,
                 updated_at=a.updated_at,
             )
-            for a in paginated
+            for a in announcements
         ],
         total=total,
         skip=skip,
@@ -1131,6 +1235,9 @@ async def admin_list_payments(
     limit: int = Query(default=100, ge=1, le=100),
     student_id: str | None = Query(default=None),
     course_id: str | None = Query(default=None),
+    payment_status: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=80),
+    sort: str | None = Query(default=None, max_length=40),
     service: PaymentService = Depends(get_payment_service),
     admin_user: User = Depends(get_payment_admin),
 ) -> PaginatedResponse[PaymentPublic]:
@@ -1140,6 +1247,9 @@ async def admin_list_payments(
         limit=limit,
         student_id=student_id,
         course_id=course_id,
+        payment_status=payment_status,
+        q=q,
+        sort=sort,
     )
     
     return PaginatedResponse(
@@ -1701,23 +1811,21 @@ async def admin_list_enrollments(
     status: str | None = Query(default=None),
     payment_status: str | None = Query(default=None),
     verified: bool | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=80),
+    sort: str | None = Query(default=None, max_length=40),
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
     admin_user: User = Depends(get_management_user),
 ) -> PaginatedResponse[EnrollmentPublic]:
     """List all enrollments (admin only)."""
-    filter_dict: dict[str, any] = {}
-    if status:
-        filter_dict["status"] = status
-    if payment_status:
-        filter_dict["payment_status"] = payment_status
-    if verified is not None:
-        filter_dict["verified_by_admin"] = verified
-    
-    # Use collection directly for filtering
-    cursor = enrollment_repo.collection.find(filter_dict).skip(skip).limit(limit)
-    docs = await cursor.to_list(length=limit)
-    enrollments = [enrollment_repo._to_model(doc) for doc in docs]
-    total = await enrollment_repo.count(filter=filter_dict)
+    enrollments, total = await enrollment_repo.list_page(
+        skip=skip,
+        limit=limit,
+        status=status,
+        payment_status=payment_status,
+        verified=verified,
+        q=q,
+        sort=sort,
+    )
     
     return PaginatedResponse(
         items=[
@@ -1856,11 +1964,20 @@ def _audit_public(record) -> AuditLogPublic:
 async def admin_list_audit_logs(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
+    action: str | None = Query(default=None, max_length=80),
+    entity_type: str | None = Query(default=None, max_length=80),
+    q: str | None = Query(default=None, max_length=80),
     admin_user: User = Depends(get_admin_user),
     audits: AuditLogRepository = Depends(get_audit_repository),
 ) -> PaginatedResponse[AuditLogPublic]:
     """Recent sensitive actions. Passwords and tokens are redacted again on read."""
-    records, total = await audits.list_recent(skip=skip, limit=limit)
+    records, total = await audits.list_recent(
+        skip=skip,
+        limit=limit,
+        action=action,
+        entity_type=entity_type,
+        q=q,
+    )
     return PaginatedResponse(
         items=[_audit_public(record) for record in records],
         total=total,

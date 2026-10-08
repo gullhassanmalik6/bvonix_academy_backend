@@ -30,6 +30,8 @@ class Payment:
     created_by: str | None  # Admin user_id if manual entry
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
+    archived_by: str | None = None
 
     @staticmethod
     def now_utc() -> datetime:

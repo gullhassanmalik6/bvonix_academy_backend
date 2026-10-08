@@ -4,11 +4,21 @@ from datetime import datetime, timezone
 from typing import Any
 
 from bson import ObjectId
-from pymongo import ASCENDING
+from pymongo import ASCENDING, DESCENDING
 
 from app.models.scholarship import Scholarship
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
+from app.repositories.listing import sort_pairs, text_clause
 from app.utils.helpers import oid_str
+
+SCHOLARSHIP_SORTS = {
+    "created_at": [("created_at", ASCENDING)],
+    "-created_at": [("created_at", DESCENDING)],
+    "amount": [("amount", ASCENDING)],
+    "-amount": [("amount", DESCENDING)],
+    "status": [("status", ASCENDING), ("created_at", DESCENDING)],
+}
 
 
 class ScholarshipRepository(BaseRepository[Scholarship]):
@@ -20,6 +30,8 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
         await self.collection.create_index([("course_id", ASCENDING)])
         await self.collection.create_index([("status", ASCENDING)])
         await self.collection.create_index([("student_id", ASCENDING), ("status", ASCENDING)])
+        await self.collection.create_index([("created_at", DESCENDING)])
+        await self.collection.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
 
     def _to_model(self, doc: dict[str, Any]) -> Scholarship:
         return Scholarship(
@@ -41,6 +53,36 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
             notes=doc.get("notes"),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
+        )
+
+    async def list_page(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        student_id: str | None = None,
+        status: str | None = None,
+        q: str | None = None,
+        sort: str | None = None,
+    ) -> tuple[list[Scholarship], int]:
+        """Filter, search, sort, and page scholarships in MongoDB."""
+        query: dict[str, Any] = {}
+        if student_id:
+            try:
+                query["student_id"] = ObjectId(student_id)
+            except Exception:
+                return [], 0
+        if status:
+            query["status"] = status
+        if q and q.strip():
+            query["$or"] = text_clause(q, ("scholarship_type", "notes", "status"))["$or"]
+        return await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=sort_pairs(sort, allowed=SCHOLARSHIP_SORTS, default="-created_at"),
         )
 
     async def get_by_id(self, scholarship_id: str) -> Scholarship | None:
@@ -58,7 +100,7 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
         except Exception:
             return []
         
-        filter_dict: dict[str, Any] = {"student_id": student_oid}
+        filter_dict: dict[str, Any] = with_active({"student_id": student_oid})
         if status:
             filter_dict["status"] = status
         
@@ -78,13 +120,13 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
         except Exception:
             return []
         
-        cursor = self.collection.find({
+        cursor = self.collection.find(with_active({
             "student_id": student_oid,
             "$or": [
                 {"course_id": course_oid},
                 {"course_id": None},  # Scholarships for all courses
             ],
-        })
+        }))
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 

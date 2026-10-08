@@ -4,11 +4,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 from bson import ObjectId
-from pymongo import ASCENDING
+from pymongo import ASCENDING, DESCENDING
 
 from app.models.enrollment import Enrollment
 from app.repositories.base import BaseRepository
+from app.repositories.listing import sort_pairs, text_clause
 from app.utils.helpers import oid_str
+
+ENROLLMENT_SORTS = {
+    "created_at": [("created_at", ASCENDING)],
+    "-created_at": [("created_at", DESCENDING)],
+    "enrollment_date": [("enrollment_date", ASCENDING)],
+    "-enrollment_date": [("enrollment_date", DESCENDING)],
+    "status": [("status", ASCENDING), ("created_at", DESCENDING)],
+}
 
 
 class EnrollmentRepository(BaseRepository[Enrollment]):
@@ -22,6 +31,10 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
         await self.collection.create_index([("course_id", ASCENDING)])
         await self.collection.create_index([("status", ASCENDING)])
         await self.collection.create_index([("review_state", ASCENDING)])
+        await self.collection.create_index([("created_at", DESCENDING)])
+        await self.collection.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
+        await self.collection.create_index([("payment_status", ASCENDING), ("created_at", DESCENDING)])
+        await self.collection.create_index([("verified_by_admin", ASCENDING), ("created_at", DESCENDING)])
         await self.collection.create_index([("enrollment_card_number", ASCENDING)], unique=True, sparse=True)
 
     def _to_model(self, doc: dict[str, Any]) -> Enrollment:
@@ -53,6 +66,37 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
             review_state=doc.get("review_state"),
+        )
+
+    async def list_page(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        status: str | None = None,
+        payment_status: str | None = None,
+        verified: bool | None = None,
+        q: str | None = None,
+        sort: str | None = None,
+    ) -> tuple[list[Enrollment], int]:
+        """Filter, search, sort, and page enrollments in MongoDB."""
+        query: dict[str, Any] = {}
+        if status:
+            query["status"] = status
+        if payment_status:
+            query["payment_status"] = payment_status
+        if verified is not None:
+            query["verified_by_admin"] = verified
+        if q and q.strip():
+            query["$or"] = text_clause(
+                q,
+                ("enrollment_card_number", "phone_number", "class_type", "father_guardian_name"),
+            )["$or"]
+        return await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=sort_pairs(sort, allowed=ENROLLMENT_SORTS, default="-created_at"),
         )
 
     async def get_by_id(self, enrollment_id: str) -> Enrollment | None:
