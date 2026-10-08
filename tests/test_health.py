@@ -6,7 +6,13 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.core.health import check_database, live_payload, readiness_response
+from app.core.health import (
+    check_database,
+    ensure_startup_database,
+    live_payload,
+    readiness_response,
+    startup_requires_database,
+)
 from app.routes.api import health
 
 
@@ -56,6 +62,27 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(body["status"], "not_ready")
         self.assertEqual(body["checks"]["database"]["status"], "down")
+
+    def test_liveness_payload_has_no_dependency_checks(self) -> None:
+        payload = live_payload()
+        self.assertEqual(set(payload), {"status", "version"})
+        self.assertNotIn("checks", payload)
+
+    def test_production_startup_fails_when_the_database_is_unavailable(self) -> None:
+        self.assertTrue(startup_requires_database("production"))
+        self.assertTrue(startup_requires_database("prod"))
+        with self.assertRaises(RuntimeError) as raised:
+            ensure_startup_database("production", False)
+        self.assertIn("MongoDB is unavailable", str(raised.exception))
+
+    def test_production_startup_continues_when_the_database_is_available(self) -> None:
+        ensure_startup_database("production", True)
+
+    def test_development_and_testing_can_start_without_the_database(self) -> None:
+        self.assertFalse(startup_requires_database("development"))
+        self.assertFalse(startup_requires_database("testing"))
+        ensure_startup_database("development", False)
+        ensure_startup_database("testing", False)
 
 
 if __name__ == "__main__":

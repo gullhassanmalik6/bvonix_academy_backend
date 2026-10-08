@@ -9,15 +9,24 @@ from __future__ import annotations
 
 from pymongo.errors import DuplicateKeyError
 
+from app.core.permissions import is_admin
 from app.models.instructor import Instructor
 from app.repositories.instructor_repository import InstructorRepository
 from app.schemas.instructor import InstructorCreate, InstructorUpdate
-from app.utils.exceptions import ConflictError, NotFoundError
+from app.services.archive_actions import archive_record, purge_record
+from app.services.audit_service import AuditService
+from app.utils.exceptions import ConflictError, ForbiddenError, NotFoundError
 
 
 class InstructorService:
-    def __init__(self, instructor_repo: InstructorRepository) -> None:
+    def __init__(
+        self,
+        instructor_repo: InstructorRepository,
+        *,
+        audit: AuditService | None = None,
+    ) -> None:
         self._instructors = instructor_repo
+        self._audit = audit
 
     async def get_instructor(self, instructor_id: str) -> Instructor:
         """Get an instructor by ID."""
@@ -78,7 +87,37 @@ class InstructorService:
             raise NotFoundError("Instructor not found")
         return updated_instructor
 
-    async def delete_instructor(self, instructor_id: str) -> None:
-        """Delete an instructor."""
+    async def delete_instructor(
+        self,
+        instructor_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive an instructor profile. The row stays for audit."""
+        if not is_admin(actor_role):
+            raise ForbiddenError("Admin access required")
         instructor = await self.get_instructor(instructor_id)
-        await self._instructors.delete(instructor_id)
+        await archive_record(
+            self._instructors,
+            instructor,
+            archived_by=archived_by,
+            deactivate=True,
+            audit=self._audit,
+            action="instructor.delete",
+            entity_type="instructor",
+            not_found="Instructor not found",
+        )
+
+    async def purge_instructor(self, instructor_id: str, *, actor_role: str, actor_id: str) -> None:
+        """Permanently remove an instructor profile. Super admin only."""
+        instructor = await self.get_instructor(instructor_id)
+        await purge_record(
+            self._instructors,
+            instructor,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            audit=self._audit,
+            entity_type="instructor",
+            not_found="Instructor not found",
+        )

@@ -34,6 +34,16 @@ class CourseMaterialService:
             raise NotFoundError("Course material not found")
         return material
 
+    async def list_course_materials(
+        self,
+        course_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[CourseMaterial], int]:
+        """Page materials for one course without loading the whole set into Python."""
+        return await self._materials.list_page(course_id, skip=skip, limit=limit, published_only=False)
+
     async def get_course_materials(
         self,
         course_id: str,

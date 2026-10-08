@@ -9,6 +9,7 @@ from bson import ObjectId
 from pymongo import ASCENDING
 
 from app.models.certificate import Certificate
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -46,10 +47,12 @@ class CertificateRepository(BaseRepository[Certificate]):
             is_verified=doc.get("is_verified", False),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
 
     async def count_issued(self) -> int:
-        return await self.collection.count_documents({})
+        return await self.collection.count_documents(with_active())
 
     async def get_by_student(self, student_id: str) -> list[Certificate]:
         """Get all certificates for a student."""
@@ -57,7 +60,7 @@ class CertificateRepository(BaseRepository[Certificate]):
             student_oid = ObjectId(student_id)
         except Exception:
             return []
-        cursor = self.collection.find({"student_id": student_oid}).sort("issue_date", -1)
+        cursor = self.collection.find(with_active({"student_id": student_oid})).sort("issue_date", -1)
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 
@@ -68,7 +71,7 @@ class CertificateRepository(BaseRepository[Certificate]):
             course_oid = ObjectId(course_id)
         except Exception:
             return None
-        doc = await self.collection.find_one({"student_id": student_oid, "course_id": course_oid})
+        doc = await self.collection.find_one(with_active({"student_id": student_oid, "course_id": course_oid}))
         return self._to_model(doc) if doc else None
 
     async def get_by_certificate_number(self, certificate_number: str) -> Certificate | None:

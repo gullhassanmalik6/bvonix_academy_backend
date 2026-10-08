@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING
 
 from app.models.attendance import Attendance
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -39,7 +40,17 @@ class AttendanceRepository(BaseRepository[Attendance]):
             is_excused=doc.get("is_excused", False),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
+
+    async def get_by_id(self, attendance_id: str) -> Attendance | None:
+        try:
+            oid = ObjectId(attendance_id)
+        except Exception:
+            return None
+        doc = await self.collection.find_one({"_id": oid})
+        return self._to_model(doc) if doc else None
 
     async def get_by_student_and_course(self, student_id: str, course_id: str) -> list[Attendance]:
         """Get all attendance records for a student in a course."""
@@ -48,7 +59,7 @@ class AttendanceRepository(BaseRepository[Attendance]):
             course_oid = ObjectId(course_id)
         except Exception:
             return []
-        cursor = self.collection.find({"student_id": student_oid, "course_id": course_oid}).sort("date", -1)
+        cursor = self.collection.find(with_active({"student_id": student_oid, "course_id": course_oid})).sort("date", -1)
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 
@@ -58,7 +69,7 @@ class AttendanceRepository(BaseRepository[Attendance]):
             enrollment_oid = ObjectId(enrollment_id)
         except Exception:
             return []
-        cursor = self.collection.find({"enrollment_id": enrollment_oid}).sort("date", -1)
+        cursor = self.collection.find(with_active({"enrollment_id": enrollment_oid})).sort("date", -1)
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 
@@ -136,7 +147,7 @@ class AttendanceRepository(BaseRepository[Attendance]):
             return {"present": 0, "absent": 0, "late": 0, "excused": 0, "total": 0}
         
         pipeline = [
-            {"$match": {"student_id": student_oid, "course_id": course_oid}},
+            {"$match": with_active({"student_id": student_oid, "course_id": course_oid})},
             {"$group": {
                 "_id": "$status",
                 "count": {"$sum": 1}
@@ -155,7 +166,10 @@ class AttendanceRepository(BaseRepository[Attendance]):
 
     async def count_statuses(self) -> dict[str, int]:
         """Count every stored attendance mark by status."""
-        pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
+        pipeline = [
+            {"$match": with_active()},
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+        ]
         counts: dict[str, int] = {}
         async for doc in self.collection.aggregate(pipeline):
             if doc.get("_id") is None:

@@ -12,6 +12,8 @@ from typing import Literal
 
 from app.core.auth import get_current_user
 from app.core.permissions import is_management
+from app.repositories.archival import record_is_active
+from app.repositories.listing import text_clause
 from app.core.dependencies import (
     get_course_repository,
     get_student_repository,
@@ -57,55 +59,66 @@ async def search(
     search_types = [t.strip() for t in types.split(",")]
     all_results: list[SearchResult] = []
     
-    query_lower = q.lower()
-    
-    # Search courses
+    # Search courses in the database, then keep at most `limit` hits.
     if "course" in search_types:
-        courses = await course_repo.list(skip=0, limit=limit * 2)
+        courses, _total = await course_repo.find_page(
+            text_clause(q, ("title", "description")),
+            skip=0,
+            limit=limit,
+            sort=[("title", 1)],
+        )
         for course in courses:
-            if (query_lower in course.title.lower() or 
-                (course.description and query_lower in course.description.lower())):
-                all_results.append(SearchResult(
-                    type="course",
-                    id=course.id,
-                    title=course.title,
-                    description=course.description,
-                    url=f"/courses/{course.id}",
-                ))
-                if len([r for r in all_results if r.type == "course"]) >= limit:
-                    break
+            all_results.append(SearchResult(
+                type="course",
+                id=course.id,
+                title=course.title,
+                description=course.description,
+                url=f"/courses/{course.id}",
+            ))
     
     # Student and user records are management data.
-    if "student" in search_types and is_management(current_user.role):
-        students = await student_repo.list(skip=0, limit=limit * 2)
-        for student in students:
-            # Get user info for student
-            user = await user_repo.get_by_id(student.user_id)
-            if user and query_lower in (user.full_name or "").lower():
-                all_results.append(SearchResult(
-                    type="student",
-                    id=student.id,
-                    title=user.full_name or user.email,
-                    description=f"Student ID: {student.id}",
-                    url=f"/admin/students/{student.id}",
-                ))
-                if len([r for r in all_results if r.type == "student"]) >= limit:
-                    break
-    
     if "user" in search_types and is_management(current_user.role):
-        users = await user_repo.list(skip=0, limit=limit * 2)
+        users, _total = await user_repo.find_page(
+            text_clause(q, ("email", "full_name")),
+            skip=0,
+            limit=limit,
+            sort=[("full_name", 1)],
+        )
         for user in users:
-            if (query_lower in user.email.lower() or 
-                (user.full_name and query_lower in user.full_name.lower())):
-                all_results.append(SearchResult(
-                    type="user",
-                    id=user.id,
-                    title=user.full_name or user.email,
-                    description=user.email,
-                    url=f"/admin/users/{user.id}",
-                ))
-                if len([r for r in all_results if r.type == "user"]) >= limit:
-                    break
+            if not record_is_active(user):
+                continue
+            all_results.append(SearchResult(
+                type="user",
+                id=user.id,
+                title=user.full_name or user.email,
+                description=user.email,
+                url=f"/admin/users/{user.id}",
+            ))
+
+    if "student" in search_types and is_management(current_user.role):
+        matched_users, _total = await user_repo.find_page(
+            text_clause(q, ("email", "full_name")),
+            skip=0,
+            limit=limit,
+            sort=[("full_name", 1)],
+        )
+        profiles = await student_repo.find_active_by_user_ids([user.id for user in matched_users])
+        names = {user.id: user for user in matched_users if record_is_active(user)}
+        for student in profiles:
+            if not record_is_active(student):
+                continue
+            account = names.get(student.user_id)
+            if account is None:
+                continue
+            all_results.append(SearchResult(
+                type="student",
+                id=student.id,
+                title=account.full_name or account.email,
+                description=f"Student ID: {student.id}",
+                url=f"/admin/students/{student.id}",
+            ))
+            if len([item for item in all_results if item.type == "student"]) >= limit:
+                break
     
     # Limit total results
     all_results = all_results[:limit * len(search_types)]

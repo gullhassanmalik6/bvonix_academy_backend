@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING
 
 from app.models.result import Result
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -67,6 +68,8 @@ class ResultRepository(BaseRepository[Result]):
             issued_date=doc.get("issued_date") or datetime.now(timezone.utc),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
 
     async def get_by_student_and_course(self, student_id: str, course_id: str) -> list[Result]:
@@ -76,7 +79,7 @@ class ResultRepository(BaseRepository[Result]):
             course_oid = ObjectId(course_id)
         except Exception:
             return []
-        cursor = self.collection.find({"student_id": student_oid, "course_id": course_oid})
+        cursor = self.collection.find(with_active({"student_id": student_oid, "course_id": course_oid}))
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 
@@ -86,7 +89,7 @@ class ResultRepository(BaseRepository[Result]):
             enrollment_oid = ObjectId(enrollment_id)
         except Exception:
             return []
-        cursor = self.collection.find({"enrollment_id": enrollment_oid})
+        cursor = self.collection.find(with_active({"enrollment_id": enrollment_oid}))
         docs = await cursor.to_list(length=1000)
         return [self._to_model(doc) for doc in docs]
 

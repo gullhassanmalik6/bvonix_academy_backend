@@ -41,6 +41,19 @@ class LiveSessionRepository(BaseRepository[LiveSession]):
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
         )
 
+    async def list_page(
+        self,
+        course_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[LiveSession], int]:
+        try:
+            query: dict[str, Any] = {"course_id": ObjectId(course_id)}
+        except Exception:
+            return [], 0
+        return await self.find_page(query, skip=skip, limit=limit, sort=[("start_time", ASCENDING)])
+
     async def get_by_course(
         self,
         course_id: str,

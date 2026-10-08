@@ -17,6 +17,21 @@ def live_payload() -> dict[str, str]:
     return {"status": "alive", "version": get_settings().app_version}
 
 
+def startup_requires_database(app_env: str) -> bool:
+    """Production must not boot without MongoDB. Development and testing may."""
+    return (app_env or "").strip().lower() in {"production", "prod"}
+
+
+def ensure_startup_database(app_env: str, available: bool) -> None:
+    """Raise when production is starting without a reachable database."""
+    if available or not startup_requires_database(app_env):
+        return
+    raise RuntimeError(
+        "Production startup failed because MongoDB is unavailable. "
+        "The database must answer before the application serves traffic."
+    )
+
+
 async def check_database() -> bool:
     try:
         return await mongodb.ping()

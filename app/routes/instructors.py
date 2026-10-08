@@ -147,5 +147,9 @@ async def delete_instructor(
     current_user: User = Depends(get_admin_user),
 ) -> Response:
     """Delete an instructor."""
-    await service.delete_instructor(instructor_id)
+    await service.delete_instructor(
+        instructor_id,
+        archived_by=current_user.id,
+        actor_role=current_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -7,10 +7,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.core.auth import get_current_user
+from app.core.cookies import clear_refresh_cookie
 from app.services.audit_context import capture_audit_request
-from app.core.dependencies import get_user_repository, get_user_service
+from app.core.dependencies import get_session_repository, get_user_repository, get_user_service
 from app.core.security import hash_password, verify_password
 from app.models.user import User
+from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.settings import (
     NotificationPreferences,
@@ -73,8 +75,10 @@ async def update_profile(
 @router.post("/password", response_model=SettingsResponse)
 async def change_password(
     payload: PasswordChange,
+    response: Response,
     current_user: User = Depends(get_current_user),
     user_repo: UserRepository = Depends(get_user_repository),
+    sessions: SessionRepository = Depends(get_session_repository),
 ) -> SettingsResponse:
     """Change user password."""
     # Verify current password
@@ -89,6 +93,8 @@ async def change_password(
     
     # Update password
     await user_repo.update(current_user.id, {"hashed_password": new_hashed_password})
+    await sessions.revoke_all_for_user(current_user.id)
+    clear_refresh_cookie(response)
     
     return SettingsResponse(
         profile={},
@@ -147,10 +153,14 @@ async def delete_account(
     _request=Depends(capture_audit_request),
 ) -> Response:
     """
-    Permanently delete the currently authenticated user's account.
+    Archive the currently authenticated user's account.
 
-    This uses the same service-layer delete logic as admin user deletion,
-    but is scoped to the current user only.
+    The account row stays in the database. This is scoped to the current user.
     """
-    await user_service.delete_user(current_user.id)
+    await user_service.delete_user(
+        current_user.id,
+        archived_by=current_user.id,
+        actor_role=current_user.role,
+        actor_id=current_user.id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

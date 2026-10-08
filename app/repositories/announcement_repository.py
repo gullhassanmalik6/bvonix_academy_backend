@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from bson import ObjectId
-from pymongo import ASCENDING
+from pymongo import ASCENDING, DESCENDING
 
 from app.models.announcement import Announcement
 from app.repositories.base import BaseRepository
@@ -33,6 +33,29 @@ class AnnouncementRepository(BaseRepository[Announcement]):
             created_by=oid_str(doc["created_by"]),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+        )
+
+    async def list_page(
+        self,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        course_id: str | None = None,
+    ) -> tuple[list[Announcement], int]:
+        """Page announcements. Omitting course_id keeps the system-wide list."""
+        query: dict[str, Any] = {}
+        if course_id:
+            try:
+                query["course_id"] = ObjectId(course_id)
+            except Exception:
+                return [], 0
+        else:
+            query["course_id"] = None
+        return await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=[("published_at", DESCENDING)],
         )
 
     async def get_by_course(

@@ -143,9 +143,7 @@ DASHBOARD_DEFAULTS = {
     "dashboard_greeting_prefix": "Good Morning",
     "dashboard_motivational_text": "Continue Your Journey And Achieve Your Target",
     "dashboard_search_placeholder": "Search your course here...",
-    "dashboard_friends_items": [
-        {"name": "Prashant", "role": "Software Developer", "avatar_url": None},
-    ],
+    "dashboard_friends_items": [],
 }
 
 # Default footer

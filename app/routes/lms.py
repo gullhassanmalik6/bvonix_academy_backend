@@ -23,6 +23,7 @@ from app.core.dependencies import (
     get_announcement_service,
     get_require_verified_enrollment,
     get_assignment_service,
+    get_attendance_correction_service,
     get_attendance_repository,
     get_attendance_service,
     get_calendar_event_service,
@@ -62,10 +63,16 @@ from app.schemas.live_session import LiveSessionPublic
 from app.schemas.payment import PaymentPublic
 from app.schemas.result import ResultPublic
 from app.schemas.attendance import AbsenceReasonSubmit, AttendancePublic
+from app.schemas.attendance_correction import (
+    AttendanceCorrectionCreate,
+    AttendanceCorrectionPublic,
+    correction_to_public,
+)
 from app.schemas.certificate import CertificatePublic
 from app.schemas.scholarship import ScholarshipPublic, ScholarshipStatus
 from app.services.announcement_service import AnnouncementService
 from app.services.assignment_service import AssignmentService
+from app.services.attendance_correction_service import AttendanceCorrectionService
 from app.services.attendance_service import AttendanceService
 from app.services.calendar_event_service import CalendarEventService
 from app.services.audit_service import AuditService
@@ -421,6 +428,59 @@ async def get_all_my_results(
 
 
 # ==================== Attendance ====================
+
+@router.get("/attendance/corrections", response_model=PaginatedResponse[AttendanceCorrectionPublic])
+async def list_my_attendance_corrections(
+    course_id: str | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    student_repo: StudentRepository = Depends(get_student_repository),
+    service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+) -> PaginatedResponse[AttendanceCorrectionPublic]:
+    """List correction requests for the signed-in student."""
+    student = await student_repo.get_by_user_id(current_user.id)
+    if not student:
+        return PaginatedResponse(items=[], total=0, skip=skip, limit=limit)
+    corrections, total = await service.list_corrections(
+        skip=skip,
+        limit=limit,
+        student_id=student.id,
+        course_id=course_id,
+    )
+    return PaginatedResponse(
+        items=[correction_to_public(item) for item in corrections],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/attendance/{attendance_id}/corrections",
+    response_model=AttendanceCorrectionPublic,
+    status_code=status.HTTP_201_CREATED,
+)
+async def request_attendance_correction(
+    attendance_id: str,
+    payload: AttendanceCorrectionCreate,
+    current_user: User = Depends(get_current_user),
+    student_repo: StudentRepository = Depends(get_student_repository),
+    service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+) -> AttendanceCorrectionPublic:
+    """Ask for a correction of the signed-in student's own attendance mark."""
+    student = await student_repo.get_by_user_id(current_user.id)
+    if not student:
+        raise ForbiddenError("A student profile is required to request an attendance correction")
+    correction = await service.request_correction(
+        attendance_id=attendance_id,
+        student_id=student.id,
+        requester_id=current_user.id,
+        reason=payload.reason,
+        requested_status=payload.requested_status,
+    )
+    return correction_to_public(correction)
+
 
 @router.get("/attendance/{course_id}", response_model=list[AttendancePublic])
 async def get_my_attendance(

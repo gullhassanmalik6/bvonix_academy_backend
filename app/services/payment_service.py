@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.core.enrollment_workflow import assert_payment_transition
+from app.core.permissions import can_approve_payments
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.payment import PaymentCreate, PaymentUpdate
 from app.models.payment import Payment
+from app.services.archive_actions import archive_record, purge_record
 from app.services.audit_service import AuditService, write_audit
-from app.utils.exceptions import NotFoundError
+from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
 class PaymentService:
@@ -59,19 +61,20 @@ class PaymentService:
         limit: int = 100,
         student_id: str | None = None,
         course_id: str | None = None,
+        payment_status: str | None = None,
+        q: str | None = None,
+        sort: str | None = None,
     ) -> tuple[list[Payment], int]:
-        """List payments with optional filters."""
-        all_payments = await self._payments.list(skip=0, limit=10000)
-        
-        # Apply filters
-        if student_id:
-            all_payments = [p for p in all_payments if p.student_id == student_id]
-        if course_id:
-            all_payments = [p for p in all_payments if p.course_id == course_id]
-        
-        total = len(all_payments)
-        paginated = all_payments[skip:skip + limit]
-        return paginated, total
+        """List payments with filters applied in MongoDB."""
+        return await self._payments.list_page(
+            skip=skip,
+            limit=limit,
+            student_id=student_id,
+            course_id=course_id,
+            payment_status=payment_status,
+            q=q,
+            sort=sort,
+        )
 
     async def update_payment(
         self,
@@ -118,9 +121,37 @@ class PaymentService:
         )
         return updated
 
-    async def delete_payment(self, payment_id: str) -> None:
-        """Delete a payment."""
+    async def delete_payment(
+        self,
+        payment_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive a payment. The row stays for audit."""
+        if not can_approve_payments(actor_role):
+            raise ForbiddenError("You cannot approve or manage payments")
         payment = await self.get_payment(payment_id)
-        deleted = await self._payments.delete(payment_id)
-        if not deleted:
-            raise NotFoundError("Payment not found")
+        await archive_record(
+            self._payments,
+            payment,
+            archived_by=archived_by,
+            deactivate=False,
+            audit=self._audit,
+            action="payment.delete",
+            entity_type="payment",
+            not_found="Payment not found",
+        )
+
+    async def purge_payment(self, payment_id: str, *, actor_role: str, actor_id: str) -> None:
+        """Permanently remove a payment. Super admin only."""
+        payment = await self.get_payment(payment_id)
+        await purge_record(
+            self._payments,
+            payment,
+            actor_role=actor_role,
+            actor_id=actor_id,
+            audit=self._audit,
+            entity_type="payment",
+            not_found="Payment not found",
+        )

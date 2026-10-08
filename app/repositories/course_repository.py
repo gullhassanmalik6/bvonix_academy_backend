@@ -19,6 +19,8 @@ class CourseRepository(BaseRepository[Course]):
         await self.collection.create_index([("instructor_id", ASCENDING)])
         # Index on is_published for filtering
         await self.collection.create_index([("is_published", ASCENDING)])
+        await self.collection.create_index([("title", ASCENDING)])
+        await self.collection.create_index([("created_at", ASCENDING)])
 
     def _to_model(self, doc: dict[str, Any]) -> Course:
         return Course(

@@ -47,6 +47,16 @@ class AssignmentService:
             raise NotFoundError("Assignment not found")
         return assignment
 
+    async def list_course_assignments(
+        self,
+        course_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Assignment], int]:
+        """Page assignments for one course without loading the whole set into Python."""
+        return await self._assignments.list_page(course_id, skip=skip, limit=limit, published_only=False)
+
     async def get_course_assignments(
         self,
         course_id: str,

@@ -7,6 +7,7 @@ from pymongo import ASCENDING, DESCENDING
 
 from app.models.audit_log import AuditLog
 from app.repositories.base import BaseRepository
+from app.repositories.listing import clamp_limit, clamp_skip, text_clause
 from app.utils.helpers import oid_str
 
 
@@ -35,10 +36,33 @@ class AuditLogRepository(BaseRepository[AuditLog]):
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
         )
 
-    async def list_recent(self, *, skip: int, limit: int) -> tuple[list[AuditLog], int]:
-        total = await self.collection.count_documents({})
-        cursor = self.collection.find({}).sort("created_at", DESCENDING).skip(skip).limit(limit)
-        docs = await cursor.to_list(length=limit)
+    async def list_recent(
+        self,
+        *,
+        skip: int,
+        limit: int,
+        action: str | None = None,
+        entity_type: str | None = None,
+        q: str | None = None,
+    ) -> tuple[list[AuditLog], int]:
+        """Page audit rows in MongoDB. Newest records come first."""
+        safe_skip = clamp_skip(skip)
+        safe_limit = clamp_limit(limit)
+        query: dict[str, Any] = {}
+        if action:
+            query["action"] = action
+        if entity_type:
+            query["entity_type"] = entity_type
+        if q and q.strip():
+            query["$or"] = text_clause(q, ("action", "entity_type", "entity_id"))["$or"]
+        total = await self.collection.count_documents(query)
+        cursor = (
+            self.collection.find(query)
+            .sort("created_at", DESCENDING)
+            .skip(safe_skip)
+            .limit(safe_limit)
+        )
+        docs = await cursor.to_list(length=safe_limit)
         return [self._to_model(doc) for doc in docs], total
 
     async def create(self, document: dict[str, Any]) -> AuditLog:

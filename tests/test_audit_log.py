@@ -128,6 +128,17 @@ class _Users:
         self.deleted = user_id == self.user.id
         return self.deleted
 
+    async def archive(self, user_id: str, *, archived_by: str | None = None, deactivate: bool = False) -> User | None:
+        if self.deleted or user_id != self.user.id:
+            return None
+        self.user = replace(
+            self.user,
+            is_active=False if deactivate else self.user.is_active,
+            archived_at=_now(),
+            archived_by=archived_by,
+        )
+        return self.user
+
 
 class _Scholarships:
     def __init__(self, scholarship: Scholarship) -> None:
@@ -386,7 +397,14 @@ class AuditLogTests(unittest.TestCase):
         users = _Users(student)
         service = UserService(users, audit=audit)
         asyncio.run(service.update_user("user-2", UserUpdate(role="admin")))
-        asyncio.run(service.delete_user("user-2"))
+        asyncio.run(
+            service.delete_user(
+                "user-2",
+                archived_by="admin-1",
+                actor_role="admin",
+                actor_id="admin-1",
+            )
+        )
         self.assertEqual([item["action"] for item in repo.documents], ["user.permission_change", "user.delete"])
         self.assertEqual(repo.documents[0]["previous_state"]["role"], "user")
         self.assertEqual(repo.documents[0]["new_state"]["role"], "admin")
@@ -429,7 +447,7 @@ class AuditLogTests(unittest.TestCase):
         )
 
         class _Logs:
-            async def list_recent(self, *, skip: int, limit: int):
+            async def list_recent(self, *, skip: int, limit: int, action=None, entity_type=None, q=None):
                 self.skip = skip
                 self.limit = limit
                 return [stored], 1
