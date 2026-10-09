@@ -13,6 +13,7 @@ from app.core.health import (
     readiness_response,
     startup_requires_database,
 )
+from app.db.index_status import ensure_required_index, required_indexes_ready, reset_required_index_status
 from app.routes.api import health
 
 
@@ -62,6 +63,33 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(body["status"], "not_ready")
         self.assertEqual(body["checks"]["database"]["status"], "down")
+
+    def test_a_failed_required_index_is_not_ready(self) -> None:
+        import json
+
+        class _Index:
+            async def create_index(self, keys, **kwargs):
+                del keys, kwargs
+                raise RuntimeError("index unavailable")
+
+        reset_required_index_status()
+        try:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(ensure_required_index(_Index(), [("email", 1)], unique=True))
+            self.assertFalse(required_indexes_ready())
+            with (
+                patch("app.core.health.check_database", new=AsyncMock(return_value=True)),
+                patch("app.core.health.check_storage", return_value=True),
+            ):
+                response = asyncio.run(readiness_response())
+            body = json.loads(response.body)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(body["status"], "not_ready")
+            self.assertEqual(body["checks"]["indexes"]["status"], "down")
+            self.assertEqual(body["checks"]["database"]["status"], "up")
+            self.assertNotIn("index unavailable", response.body.decode())
+        finally:
+            reset_required_index_status()
 
     def test_liveness_payload_has_no_dependency_checks(self) -> None:
         payload = live_payload()

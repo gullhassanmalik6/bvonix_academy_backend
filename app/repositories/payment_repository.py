@@ -55,6 +55,7 @@ class PaymentRepository(BaseRepository[Payment]):
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
             archived_at=doc.get("archived_at"),
             archived_by=doc.get("archived_by"),
+            audit_pending=doc.get("audit_pending") or None,
         )
 
     async def list_page(
@@ -94,6 +95,15 @@ class PaymentRepository(BaseRepository[Payment]):
             sort=sort_pairs(sort, allowed=PAYMENT_SORTS, default="-created_at"),
         )
 
+    async def get_by_id(self, payment_id: str) -> Payment | None:
+        """Load one active payment. Archived rows stay out of operational reads."""
+        try:
+            oid = ObjectId(payment_id)
+        except Exception:
+            return None
+        doc = await self.collection.find_one(with_active({"_id": oid}))
+        return self._to_model(doc) if doc else None
+
     async def get_by_student(self, student_id: str) -> list[Payment]:
         """Get all payments for a student."""
         try:
@@ -101,9 +111,28 @@ class PaymentRepository(BaseRepository[Payment]):
         except Exception:
             return []
         
-        cursor = self.collection.find(with_active({"student_id": student_oid})).sort("created_at", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"student_id": student_oid},
+            sort=[("created_at", DESCENDING)],
+        )
+
+    async def page_for_student(
+        self,
+        student_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Payment], int]:
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {"student_id": student_oid},
+            skip=skip,
+            limit=limit,
+            sort=[("created_at", DESCENDING)],
+        )
 
     async def get_by_course(self, course_id: str) -> list[Payment]:
         """Get all payments for a course."""
@@ -112,9 +141,10 @@ class PaymentRepository(BaseRepository[Payment]):
         except Exception:
             return []
         
-        cursor = self.collection.find(with_active({"course_id": course_oid})).sort("created_at", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"course_id": course_oid},
+            sort=[("created_at", DESCENDING)],
+        )
 
     async def create_payment(
         self,

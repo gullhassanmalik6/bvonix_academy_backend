@@ -6,10 +6,14 @@ from typing import Any
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.enrollment import Enrollment
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.repositories.listing import sort_pairs, text_clause
 from app.utils.helpers import oid_str
+
+VERIFIED_ACCESS_STATUSES = ("active", "completed")
 
 ENROLLMENT_SORTS = {
     "created_at": [("created_at", ASCENDING)],
@@ -25,7 +29,9 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
 
     async def ensure_indexes(self) -> None:
         # Unique enrollment per student-course combination
-        await self.collection.create_index([("student_id", ASCENDING), ("course_id", ASCENDING)], unique=True)
+        await ensure_required_index(
+            self.collection, [("student_id", ASCENDING), ("course_id", ASCENDING)], unique=True
+        )
         # Indexes for filtering
         await self.collection.create_index([("student_id", ASCENDING)])
         await self.collection.create_index([("course_id", ASCENDING)])
@@ -35,7 +41,15 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
         await self.collection.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
         await self.collection.create_index([("payment_status", ASCENDING), ("created_at", DESCENDING)])
         await self.collection.create_index([("verified_by_admin", ASCENDING), ("created_at", DESCENDING)])
-        await self.collection.create_index([("enrollment_card_number", ASCENDING)], unique=True, sparse=True)
+        await self.collection.create_index([
+            ("student_id", ASCENDING),
+            ("verified_by_admin", ASCENDING),
+            ("status", ASCENDING),
+            ("enrollment_date", ASCENDING),
+        ])
+        await ensure_required_index(
+            self.collection, [("enrollment_card_number", ASCENDING)], unique=True, sparse=True
+        )
 
     def _to_model(self, doc: dict[str, Any]) -> Enrollment:
         return Enrollment(
@@ -66,6 +80,7 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
             review_state=doc.get("review_state"),
+            audit_pending=doc.get("audit_pending") or None,
         )
 
     async def list_page(
@@ -108,10 +123,52 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
         doc = await self.collection.find_one({"_id": enrollment_oid})
         return self._to_model(doc) if doc else None
 
+    async def find_by_stored_file(self, field: str, url: str) -> Enrollment | None:
+        """Find the enrollment that stores this private file URL."""
+        if field not in {"payment_receipt_url", "profile_image_url", "enrollment_card_url"}:
+            return None
+        if not url:
+            return None
+        doc = await self.collection.find_one({field: url})
+        return self._to_model(doc) if doc else None
+
+    async def delete(self, doc_id: str) -> bool:
+        """Cancellation changes status. Ordinary delete must not archive or erase the row."""
+        del doc_id
+        return False
+
     async def get_by_card_number(self, card_number: str) -> Enrollment | None:
         """Find enrollment by printed card number (QR verification)."""
         doc = await self.collection.find_one({"enrollment_card_number": card_number})
         return self._to_model(doc) if doc else None
+
+    async def registration_course_ids(self, student_id: str) -> list[str]:
+        """Course ids for enrollments that are not cancelled.
+
+        Pages of 100 keep each read bounded. Duplicate rows for one course
+        contribute one id and are left in place.
+        """
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return []
+        query = {"student_id": student_oid, "status": {"$ne": "cancelled"}}
+        found: set[str] = set()
+        skip = 0
+        page_size = 100
+        while True:
+            docs = await self.collection.find(query).sort(
+                [("_id", ASCENDING)]
+            ).skip(skip).limit(page_size).to_list(length=page_size)
+            if not docs:
+                break
+            for doc in docs:
+                if doc.get("course_id") is not None:
+                    found.add(oid_str(doc["course_id"]))
+            if len(docs) < page_size:
+                break
+            skip += len(docs)
+        return sorted(found)
 
     async def get_by_student_and_course(self, student_id: str, course_id: str) -> Enrollment | None:
         """Get enrollment by student and course."""
@@ -124,39 +181,193 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
         return self._to_model(doc) if doc else None
 
     async def get_by_student(self, student_id: str) -> list[Enrollment]:
-        """Get all enrollments for a student."""
+        """Get every enrollment for a student, including historical statuses."""
         try:
             student_oid = ObjectId(student_id)
         except Exception:
             return []
-        cursor = self.collection.find({"student_id": student_oid})
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"student_id": student_oid},
+            sort=[("enrollment_date", ASCENDING)],
+        )
 
     async def get_verified_by_student(self, student_id: str) -> list[Enrollment]:
-        """Get all admin-verified enrollments for a student."""
+        """Get every admin-verified active or completed enrollment for a student."""
         try:
             student_oid = ObjectId(student_id)
         except Exception:
             return []
-        cursor = self.collection.find({
+        return await self.collect(
+            {
+                "student_id": student_oid,
+                "verified_by_admin": True,
+                "status": {"$in": ["active", "completed"]},
+            },
+            sort=[("enrollment_date", ASCENDING)],
+        )
+
+    async def list_current_for_student(self, student_id: str) -> list[Enrollment]:
+        """Current dashboard rows: admin-verified enrollments that are still active."""
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return []
+        return await self.collect(
+            {
+                "student_id": student_oid,
+                "verified_by_admin": True,
+                "status": "active",
+            },
+            sort=[("enrollment_date", ASCENDING)],
+        )
+
+    async def page_for_student(
+        self,
+        student_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Enrollment], int]:
+        """Page a student's enrollment history, including cancelled and completed rows."""
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {"student_id": student_oid},
+            skip=skip,
+            limit=limit,
+            sort=[("enrollment_date", ASCENDING)],
+        )
+
+    async def page_current_for_student(
+        self,
+        student_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Enrollment], int]:
+        """Page current dashboard rows with the same filter as list_current_for_student."""
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {
+                "student_id": student_oid,
+                "verified_by_admin": True,
+                "status": "active",
+            },
+            skip=skip,
+            limit=limit,
+            sort=[("enrollment_date", ASCENDING)],
+        )
+
+    def _verified_query(self, student_oid: ObjectId, course_oid: ObjectId | None = None) -> dict[str, Any]:
+        """Same verified active/completed filter used by get_verified_by_student."""
+        query: dict[str, Any] = {
             "student_id": student_oid,
             "verified_by_admin": True,
-        })
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+            "status": {"$in": list(VERIFIED_ACCESS_STATUSES)},
+        }
+        if course_oid is not None:
+            query["course_id"] = course_oid
+        return with_active(query)
 
     async def has_verified_enrollment(self, student_id: str) -> bool:
-        """Check if student has at least one admin-verified enrollment."""
+        """True when one eligible enrollment exists. Does not load the student's other rows."""
         try:
             student_oid = ObjectId(student_id)
         except Exception:
             return False
-        count = await self.collection.count_documents({
-            "student_id": student_oid,
-            "verified_by_admin": True,
-        })
-        return count > 0
+        found = await self.collection.find_one(self._verified_query(student_oid))
+        return found is not None
+
+    async def get_access_enrollment(self, student_id: str, course_id: str) -> Enrollment | None:
+        """The one verified active or completed enrollment for this student and course."""
+        try:
+            student_oid = ObjectId(student_id)
+            course_oid = ObjectId(course_id)
+        except Exception:
+            return None
+        doc = await self.collection.find_one(self._verified_query(student_oid, course_oid))
+        return self._to_model(doc) if doc else None
+
+    async def get_owned_verified(self, student_id: str, enrollment_id: str) -> Enrollment | None:
+        """One verified enrollment owned by this student."""
+        try:
+            student_oid = ObjectId(student_id)
+            enrollment_oid = ObjectId(enrollment_id)
+        except Exception:
+            return None
+        query = self._verified_query(student_oid)
+        query["_id"] = enrollment_oid
+        doc = await self.collection.find_one(query)
+        return self._to_model(doc) if doc else None
+
+    async def page_verified(
+        self,
+        student_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Enrollment], int]:
+        """Page verified active and completed enrollments. total matches that filter."""
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            self._verified_query(student_oid),
+            skip=skip,
+            limit=limit,
+            sort=[("enrollment_date", ASCENDING)],
+        )
+
+    async def count_verified_statuses(self, student_id: str) -> dict[str, int]:
+        """Count verified enrollments by status without building enrollment models."""
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return {"active": 0, "completed": 0}
+        counts = {"active": 0, "completed": 0}
+        pipeline = [
+            {"$match": self._verified_query(student_oid)},
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+        ]
+        async for doc in self.collection.aggregate(pipeline):
+            status = doc.get("_id")
+            if status in counts:
+                counts[status] = int(doc.get("count") or 0)
+        return counts
+
+    async def verified_course_ids(self, student_id: str) -> list[str]:
+        """Course ids for verified enrollments, read in pages and not turned into models.
+
+        Calendar and upcoming sessions need this id set. The ids are the filter,
+        so the list is complete, while each database page stays bounded.
+        """
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return []
+        query = self._verified_query(student_oid)
+        found: list[str] = []
+        skip = 0
+        page_size = 100
+        while True:
+            docs = await self.collection.find(query).sort(
+                [("enrollment_date", ASCENDING), ("_id", ASCENDING)]
+            ).skip(skip).limit(page_size).to_list(length=page_size)
+            if not docs:
+                break
+            for doc in docs:
+                if doc.get("course_id") is not None:
+                    found.append(oid_str(doc["course_id"]))
+            if len(docs) < page_size:
+                break
+            skip += len(docs)
+        return found
 
     async def get_by_course(self, course_id: str) -> list[Enrollment]:
         """Get all enrollments for a course."""
@@ -164,9 +375,10 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
             course_oid = ObjectId(course_id)
         except Exception:
             return []
-        cursor = self.collection.find({"course_id": course_oid})
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"course_id": course_oid},
+            sort=[("enrollment_date", ASCENDING)],
+        )
 
     async def create_enrollment(
         self,

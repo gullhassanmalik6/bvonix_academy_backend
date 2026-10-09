@@ -7,8 +7,13 @@ from app.core.permissions import can_approve_payments
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.payment import PaymentCreate, PaymentUpdate
 from app.models.payment import Payment
-from app.services.archive_actions import archive_record, purge_record
-from app.services.audit_service import AuditService, write_audit
+from app.services.archive_actions import archive_record, load_for_maintenance, purge_record
+from app.services.audit_service import (
+    AuditService,
+    commit_required_decision,
+    recover_pending_decision,
+    write_audit,
+)
 from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
@@ -21,8 +26,12 @@ class PaymentService:
         self,
         payload: PaymentCreate,
         created_by: str | None = None,
+        *,
+        actor_role: str,
     ) -> Payment:
-        """Create a new payment record."""
+        """Create a ledger payment. This does not change the enrollment."""
+        if not can_approve_payments(actor_role):
+            raise ForbiddenError("You cannot approve or manage payments")
         payment = await self._payments.create_payment(
             student_id=payload.student_id,
             course_id=payload.course_id,
@@ -80,12 +89,27 @@ class PaymentService:
         self,
         payment_id: str,
         payload: PaymentUpdate,
+        *,
+        actor_role: str,
+        actor_id: str | None = None,
     ) -> Payment:
-        """Update a payment."""
+        """Update one ledger payment. Enrollment verification is a separate record."""
+        if not can_approve_payments(actor_role):
+            raise ForbiddenError("You cannot approve or manage payments")
         payment = await self.get_payment(payment_id)
-        
+        if self._audit is not None and isinstance(payment.audit_pending, dict):
+            async def clear_pending():
+                return await self._payments.update(payment.id, {"audit_pending": None})
+
+            await recover_pending_decision(self._audit, payment, clear_pending)
+            payment = await self.get_payment(payment_id)
+
         update_data: dict[str, any] = {}
-        if payload.payment_status is not None:
+        status_changed = (
+            payload.payment_status is not None
+            and payload.payment_status != payment.payment_status
+        )
+        if status_changed:
             assert_payment_transition(payment.payment_status, payload.payment_status)
             update_data["payment_status"] = payload.payment_status
         if payload.transaction_id is not None:
@@ -98,27 +122,33 @@ class PaymentService:
             update_data["payment_date"] = payload.payment_date
         if payload.notes is not None:
             update_data["notes"] = payload.notes
-        
+        if not update_data:
+            return payment
+
         update_data["updated_at"] = datetime.now(timezone.utc)
-        
-        updated = await self._payments.update(payment_id, update_data)
+        action = "payment.update"
+        if status_changed and payload.payment_status == "completed":
+            action = "payment.approve"
+        elif status_changed and payload.payment_status == "failed":
+            action = "payment.reject"
+        elif status_changed and payload.payment_status == "refunded":
+            action = "payment.refund"
+        if self._audit is not None:
+            updated = await commit_required_decision(
+                self._audit,
+                lambda data: self._payments.update(payment_id, data),
+                action=action,
+                entity_type="payment",
+                entity_id=payment.id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                previous=payment,
+                updates=update_data,
+            )
+        else:
+            updated = await self._payments.update(payment_id, update_data)
         if not updated:
             raise NotFoundError("Payment not found")
-        action = "payment.update"
-        if payload.payment_status == "completed":
-            action = "payment.approve"
-        elif payload.payment_status == "failed":
-            action = "payment.reject"
-        elif payload.payment_status == "refunded":
-            action = "payment.refund"
-        await write_audit(
-            self._audit,
-            action=action,
-            entity_type="payment",
-            entity_id=updated.id,
-            previous=payment,
-            current=updated,
-        )
         return updated
 
     async def delete_payment(
@@ -145,7 +175,7 @@ class PaymentService:
 
     async def purge_payment(self, payment_id: str, *, actor_role: str, actor_id: str) -> None:
         """Permanently remove a payment. Super admin only."""
-        payment = await self.get_payment(payment_id)
+        payment = await load_for_maintenance(self._payments, payment_id, not_found="Payment not found")
         await purge_record(
             self._payments,
             payment,

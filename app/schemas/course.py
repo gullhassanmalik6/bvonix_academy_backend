@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from app.schemas.common import APIModel
 
@@ -17,6 +17,10 @@ class CourseCreate(APIModel):
 
 
 class CourseUpdate(APIModel):
+    """Course edit payload. Unknown fields are rejected so a client cannot set them."""
+
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(default=None, min_length=3, max_length=200)
     description: str | None = Field(default=None, min_length=10, max_length=5000)
     instructor_id: str | None = None

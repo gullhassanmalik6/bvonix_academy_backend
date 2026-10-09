@@ -6,6 +6,7 @@ import asyncio
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from app.models.assignment import AssignmentSubmission
 from app.models.attendance import Attendance
@@ -202,13 +203,34 @@ class _Enrollments:
         return self.enrollment if enrollment_id == self.enrollment.id else None
 
     async def update(self, enrollment_id: str, data: dict) -> Enrollment:
-        self.enrollment = replace(self.enrollment, status=data["status"], updated_at=data["updated_at"])
+        if enrollment_id != self.enrollment.id:
+            return None
+        self.enrollment = replace(
+            self.enrollment,
+            status=data.get("status", self.enrollment.status),
+            review_state=data.get("review_state", self.enrollment.review_state),
+            updated_at=data.get("updated_at", self.enrollment.updated_at),
+            audit_pending=data["audit_pending"] if "audit_pending" in data else self.enrollment.audit_pending,
+        )
         return self.enrollment
+
+    async def registration_course_ids(self, student_id: str) -> list[str]:
+        if student_id != self.enrollment.student_id or self.enrollment.status == "cancelled":
+            return []
+        return [self.enrollment.course_id]
 
 
 class _StudentRepo:
-    async def unenroll_from_course(self, student_id: str, course_id: str) -> None:
-        return None
+    def __init__(self) -> None:
+        self.courses = ["course-1"]
+
+    async def get_by_id(self, student_id: str):
+        return SimpleNamespace(id=student_id, enrolled_courses=list(self.courses))
+
+    async def set_enrolled_courses(self, student_id: str, course_ids: list[str], *, include_archived: bool = False):
+        del include_archived
+        self.courses = list(course_ids)
+        return SimpleNamespace(id=student_id, enrolled_courses=list(self.courses))
 
 
 def _scholarship() -> Scholarship:
@@ -326,7 +348,7 @@ class AuditLogTests(unittest.TestCase):
     def test_payment_approval_creates_an_audit_record(self) -> None:
         audit, repo = _audit()
         service = PaymentService(_Payments(_payment("pending")), audit=audit)
-        updated = asyncio.run(service.update_payment("pay-1", PaymentUpdate(payment_status="completed")))
+        updated = asyncio.run(service.update_payment("pay-1", PaymentUpdate(payment_status="completed"), actor_role="admin"))
         self.assertEqual(updated.payment_status, "completed")
         self.assertEqual(len(repo.documents), 1)
         record = repo.documents[0]
@@ -347,7 +369,7 @@ class AuditLogTests(unittest.TestCase):
 
         service = PaymentService(_Missing(_payment()), audit=audit)
         with self.assertRaises(NotFoundError):
-            asyncio.run(service.update_payment("pay-1", PaymentUpdate(payment_status="failed")))
+            asyncio.run(service.update_payment("pay-1", PaymentUpdate(payment_status="failed"), actor_role="admin"))
         self.assertEqual(repo.documents, [])
 
     def test_scholarship_termination_creates_an_audit_record(self) -> None:

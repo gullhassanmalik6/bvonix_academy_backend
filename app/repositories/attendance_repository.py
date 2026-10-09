@@ -6,6 +6,7 @@ from typing import Any
 from bson import ObjectId
 from pymongo import ASCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.attendance import Attendance
 from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
@@ -17,9 +18,10 @@ class AttendanceRepository(BaseRepository[Attendance]):
 
     async def ensure_indexes(self) -> None:
         # Unique attendance per student-course-date
-        await self.collection.create_index(
+        await ensure_required_index(
+            self.collection,
             [("student_id", ASCENDING), ("course_id", ASCENDING), ("date", ASCENDING)],
-            unique=True
+            unique=True,
         )
         await self.collection.create_index([("student_id", ASCENDING), ("course_id", ASCENDING)])
         await self.collection.create_index([("enrollment_id", ASCENDING)])
@@ -45,11 +47,7 @@ class AttendanceRepository(BaseRepository[Attendance]):
         )
 
     async def get_by_id(self, attendance_id: str) -> Attendance | None:
-        try:
-            oid = ObjectId(attendance_id)
-        except Exception:
-            return None
-        doc = await self.collection.find_one({"_id": oid})
+        doc = await self.find_document_by_id(attendance_id)
         return self._to_model(doc) if doc else None
 
     async def get_by_student_and_course(self, student_id: str, course_id: str) -> list[Attendance]:
@@ -59,9 +57,24 @@ class AttendanceRepository(BaseRepository[Attendance]):
             course_oid = ObjectId(course_id)
         except Exception:
             return []
-        cursor = self.collection.find(with_active({"student_id": student_oid, "course_id": course_oid})).sort("date", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"student_id": student_oid, "course_id": course_oid},
+            sort=[("date", -1)],
+        )
+
+    async def page_for_student_course(
+        self,
+        student_id: str,
+        course_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Attendance], int]:
+        try:
+            query = {"student_id": ObjectId(student_id), "course_id": ObjectId(course_id)}
+        except Exception:
+            return [], 0
+        return await self.find_page(query, skip=skip, limit=limit, sort=[("date", -1)])
 
     async def get_by_enrollment(self, enrollment_id: str) -> list[Attendance]:
         """Get all attendance records for an enrollment."""
@@ -69,9 +82,10 @@ class AttendanceRepository(BaseRepository[Attendance]):
             enrollment_oid = ObjectId(enrollment_id)
         except Exception:
             return []
-        cursor = self.collection.find(with_active({"enrollment_id": enrollment_oid})).sort("date", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"enrollment_id": enrollment_oid},
+            sort=[("date", -1)],
+        )
 
     async def create_attendance(
         self,
@@ -162,6 +176,43 @@ class AttendanceRepository(BaseRepository[Attendance]):
                 stats[status] = count
             stats["total"] += count
         
+        return stats
+
+    async def stats_for_courses(self, student_id: str, course_ids: list[str]) -> dict[str, dict[str, int]]:
+        """Count attendance marks for many courses in one aggregation per id chunk."""
+        empty = {"present": 0, "absent": 0, "late": 0, "excused": 0, "total": 0}
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return {}
+        oids = []
+        for raw in course_ids:
+            try:
+                oids.append(ObjectId(raw))
+            except Exception:
+                continue
+        stats = {oid_str(oid): dict(empty) for oid in oids}
+        if not oids:
+            return stats
+        step = 100
+        for start in range(0, len(oids), step):
+            chunk = oids[start:start + step]
+            pipeline = [
+                {"$match": with_active({"student_id": student_oid, "course_id": {"$in": chunk}})},
+                {"$group": {
+                    "_id": {"course_id": "$course_id", "status": "$status"},
+                    "count": {"$sum": 1},
+                }},
+            ]
+            async for doc in self.collection.aggregate(pipeline):
+                key = doc.get("_id") or {}
+                course_key = oid_str(key.get("course_id")) if key.get("course_id") is not None else None
+                status = key.get("status")
+                count = int(doc.get("count") or 0)
+                bucket = stats.setdefault(course_key or "", dict(empty))
+                if status in bucket:
+                    bucket[status] += count
+                bucket["total"] += count
         return stats
 
     async def count_statuses(self) -> dict[str, int]:

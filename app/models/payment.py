@@ -32,6 +32,7 @@ class Payment:
     updated_at: datetime
     archived_at: datetime | None = None
     archived_by: str | None = None
+    audit_pending: dict | None = None
 
     @staticmethod
     def now_utc() -> datetime:

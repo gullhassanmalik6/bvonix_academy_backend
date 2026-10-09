@@ -17,8 +17,14 @@ class CourseRepository(BaseRepository[Course]):
     async def ensure_indexes(self) -> None:
         # Index on instructor_id for faster lookups
         await self.collection.create_index([("instructor_id", ASCENDING)])
+        await self.collection.create_index([
+            ("instructor_id", ASCENDING),
+            ("archived_at", ASCENDING),
+            ("created_at", ASCENDING),
+        ])
         # Index on is_published for filtering
         await self.collection.create_index([("is_published", ASCENDING)])
+        await self.collection.create_index([("is_published", ASCENDING), ("archived_at", ASCENDING)])
         await self.collection.create_index([("title", ASCENDING)])
         await self.collection.create_index([("created_at", ASCENDING)])
 
@@ -33,31 +39,56 @@ class CourseRepository(BaseRepository[Course]):
             is_published=doc.get("is_published", False),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
 
     async def get_by_id(self, course_id: str) -> Course | None:
-        try:
-            oid = ObjectId(course_id)
-        except Exception:
-            return None
-        doc = await self.collection.find_one({"_id": oid})
+        doc = await self.find_document_by_id(course_id)
         return self._to_model(doc) if doc else None
 
     async def get_by_instructor(self, instructor_id: str) -> list[Course]:
-        """Get all courses by an instructor."""
+        """Get active courses by an instructor."""
         try:
             oid = ObjectId(instructor_id)
         except Exception:
             return []
-        cursor = self.collection.find({"instructor_id": oid})
-        docs = await cursor.to_list(length=None)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"instructor_id": oid},
+            sort=[("created_at", ASCENDING)],
+        )
+
+    async def page_by_instructor(
+        self,
+        instructor_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        published_only: bool = False,
+    ) -> tuple[list[Course], int]:
+        try:
+            oid = ObjectId(instructor_id)
+        except Exception:
+            return [], 0
+        query: dict[str, Any] = {"instructor_id": oid}
+        if published_only:
+            query["is_published"] = True
+        return await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=[("created_at", ASCENDING)],
+        )
 
     async def get_published(self, skip: int = 0, limit: int = 100) -> list[Course]:
-        """Get published courses."""
-        cursor = self.collection.find({"is_published": True}).skip(skip).limit(limit)
-        docs = await cursor.to_list(length=limit)
-        return [self._to_model(doc) for doc in docs]
+        """Get one page of published courses. The page size cannot exceed the list maximum."""
+        page, _total = await self.find_page(
+            {"is_published": True},
+            skip=skip,
+            limit=limit,
+            sort=[("created_at", ASCENDING)],
+        )
+        return page
 
     async def create_course(
         self,

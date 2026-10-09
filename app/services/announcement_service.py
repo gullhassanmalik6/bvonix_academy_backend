@@ -2,15 +2,28 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.permissions import is_management
 from app.repositories.announcement_repository import AnnouncementRepository
+from app.repositories.course_repository import CourseRepository
 from app.schemas.announcement import AnnouncementCreate, AnnouncementUpdate
 from app.models.announcement import Announcement
-from app.utils.exceptions import NotFoundError
+from app.services.archive_actions import archive_record
+from app.services.audit_service import AuditService
+from app.services.course_service import course_is_operational, require_active_course
+from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
 class AnnouncementService:
-    def __init__(self, announcement_repo: AnnouncementRepository) -> None:
+    def __init__(
+        self,
+        announcement_repo: AnnouncementRepository,
+        *,
+        courses: CourseRepository | None = None,
+        audit: AuditService | None = None,
+    ) -> None:
         self._announcements = announcement_repo
+        self._courses = courses
+        self._audit = audit
 
     async def create_announcement(
         self,
@@ -18,6 +31,7 @@ class AnnouncementService:
         created_by: str,
     ) -> Announcement:
         """Create a new announcement."""
+        await require_active_course(self._courses, payload.course_id)
         return await self._announcements.create_announcement(
             course_id=payload.course_id,
             title=payload.title,
@@ -44,6 +58,8 @@ class AnnouncementService:
         course_id: str | None = None,
     ) -> tuple[list[Announcement], int]:
         """Page announcements in MongoDB. No course id keeps system-wide rows."""
+        if course_id and not await course_is_operational(self._courses, course_id):
+            return [], 0
         return await self._announcements.list_page(skip=skip, limit=limit, course_id=course_id)
 
     async def get_course_announcements(
@@ -52,7 +68,20 @@ class AnnouncementService:
         published_only: bool = True,
     ) -> list[Announcement]:
         """Get announcements for a course or system-wide."""
+        if course_id and not await course_is_operational(self._courses, course_id):
+            return []
         return await self._announcements.get_by_course(course_id, published_only)
+
+    async def page_published(
+        self,
+        course_id: str | None,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Announcement], int]:
+        if course_id and not await course_is_operational(self._courses, course_id):
+            return [], 0
+        return await self._announcements.page_published(course_id, skip=skip, limit=limit)
 
     async def update_announcement(
         self,
@@ -61,6 +90,7 @@ class AnnouncementService:
     ) -> Announcement:
         """Update an announcement."""
         announcement = await self.get_announcement(announcement_id)
+        await require_active_course(self._courses, announcement.course_id)
         
         update_data: dict[str, any] = {}
         if payload.title is not None:
@@ -83,9 +113,24 @@ class AnnouncementService:
             raise NotFoundError("Announcement not found")
         return updated
 
-    async def delete_announcement(self, announcement_id: str) -> None:
-        """Delete an announcement."""
+    async def delete_announcement(
+        self,
+        announcement_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive an announcement."""
+        if not is_management(actor_role):
+            raise ForbiddenError("Management access required")
         announcement = await self.get_announcement(announcement_id)
-        deleted = await self._announcements.delete(announcement_id)
-        if not deleted:
-            raise NotFoundError("Announcement not found")
+        await archive_record(
+            self._announcements,
+            announcement,
+            archived_by=archived_by,
+            deactivate=False,
+            audit=self._audit,
+            action="announcement.delete",
+            entity_type="announcement",
+            not_found="Announcement not found",
+        )

@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING
 
 from app.models.live_session import LiveSession
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -16,6 +17,7 @@ class LiveSessionRepository(BaseRepository[LiveSession]):
 
     async def ensure_indexes(self) -> None:
         await self.collection.create_index([("course_id", ASCENDING)])
+        await self.collection.create_index([("course_id", ASCENDING), ("archived_at", ASCENDING)])
         await self.collection.create_index([("start_time", ASCENDING)])
         await self.collection.create_index([("status", ASCENDING)])
         await self.collection.create_index([("instructor_id", ASCENDING)])
@@ -39,7 +41,13 @@ class LiveSessionRepository(BaseRepository[LiveSession]):
             created_by=oid_str(doc["created_by"]),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
+
+    async def get_by_id(self, session_id: str) -> LiveSession | None:
+        doc = await self.find_document_by_id(session_id)
+        return self._to_model(doc) if doc else None
 
     async def list_page(
         self,
@@ -66,7 +74,7 @@ class LiveSessionRepository(BaseRepository[LiveSession]):
         except Exception:
             return []
         
-        filter_dict: dict[str, Any] = {"course_id": course_oid}
+        filter_dict: dict[str, Any] = with_active({"course_id": course_oid})
         if start_date or end_date:
             date_filter: dict[str, Any] = {}
             if start_date:
@@ -76,26 +84,45 @@ class LiveSessionRepository(BaseRepository[LiveSession]):
             if date_filter:
                 filter_dict["start_time"] = date_filter
         
-        cursor = self.collection.find(filter_dict).sort("start_time", ASCENDING)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(filter_dict, sort=[("start_time", ASCENDING)])
 
     async def get_upcoming(self, course_id: str | None = None) -> list[LiveSession]:
         """Get upcoming sessions."""
         now = datetime.now(timezone.utc)
-        filter_dict: dict[str, Any] = {
+        filter_dict: dict[str, Any] = with_active({
             "start_time": {"$gte": now},
             "status": {"$in": ["scheduled", "ongoing"]},
-        }
+        })
         if course_id:
             try:
                 filter_dict["course_id"] = ObjectId(course_id)
             except Exception:
                 return []
         
-        cursor = self.collection.find(filter_dict).sort("start_time", ASCENDING)
-        docs = await cursor.to_list(length=100)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(filter_dict, sort=[("start_time", ASCENDING)])
+
+    async def page_upcoming(
+        self,
+        course_ids: list[str] | None,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[LiveSession], int]:
+        """Page upcoming sessions for the given courses plus system-wide rows."""
+        now = datetime.now(timezone.utc)
+        query: dict[str, Any] = {
+            "start_time": {"$gte": now},
+            "status": {"$in": ["scheduled", "ongoing"]},
+        }
+        if course_ids is not None:
+            oids = []
+            for raw in course_ids:
+                try:
+                    oids.append(ObjectId(raw))
+                except Exception:
+                    return [], 0
+            query["$or"] = [{"course_id": {"$in": oids}}, {"course_id": None}]
+        return await self.find_page(query, skip=skip, limit=limit, sort=[("start_time", ASCENDING)])
 
     async def create_session(
         self,

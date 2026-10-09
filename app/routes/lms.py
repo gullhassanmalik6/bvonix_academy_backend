@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import FileResponse
 
@@ -43,6 +44,8 @@ from app.core.dependencies import (
     get_audit_service,
 )
 from app.models.user import User
+from app.repositories.archival import record_is_active
+from app.repositories.listing import clamp_limit, clamp_skip
 from app.repositories.enrollment_repository import EnrollmentRepository
 from app.repositories.instructor_repository import InstructorRepository
 from app.repositories.result_repository import ResultRepository
@@ -87,6 +90,13 @@ from app.utils.helpers import oid_str
 router = APIRouter()
 
 
+async def _course_is_current(course_repo: CourseRepository, course_id: str | None) -> bool:
+    """Current learning views only include a course that operational lookup can see."""
+    if not course_id:
+        return False
+    return await course_repo.get_by_id(course_id) is not None
+
+
 # ==================== Enrollment ====================
 
 @router.post("/enroll/{course_id}", response_model=EnrollmentPublic, status_code=status.HTTP_201_CREATED)
@@ -99,60 +109,112 @@ async def enroll_in_course(
     course_repo: CourseRepository = Depends(get_course_repository),
 ) -> EnrollmentPublic:
     """Enroll current user in a course with personal information."""
-    # Get or create student profile
-    student = await student_repo.get_by_user_id(current_user.id)
-    if not student:
-        # Create student profile if doesn't exist
-        student = await student_repo.create_student(
-            user_id=current_user.id,
-            enrollment_date=datetime.now(timezone.utc),
-        )
-    
-    # Check if course exists
-    course = await course_repo.get_by_id(course_id)
-    if not course:
-        raise NotFoundError("Course not found")
-    
-    # Check if already enrolled
-    existing = await enrollment_repo.get_by_student_and_course(student.id, course_id)
-    if existing:
-        raise ConflictError("Already enrolled in this course")
-    
-    # Create enrollment with personal information
-    enrollment = await enrollment_repo.create_enrollment(
-        student_id=student.id,
-        course_id=course_id,
-        payment_status="pending",
-        class_type=payload.class_type,
-        phone_number=payload.phone_number,
-        address=payload.address,
-        emergency_contact_name=payload.emergency_contact_name,
-        emergency_contact_phone=payload.emergency_contact_phone,
-        father_guardian_name=payload.father_guardian_name,
-        date_of_birth=payload.date_of_birth,
-        gender=payload.gender,
-        profile_image_url=payload.profile_image_url,
-    )
-    
-    # Also add to student's enrolled_courses
-    await student_repo.enroll_in_course(student.id, course_id)
-    
+    from app.services.enrollment_registration import EnrollmentRegistration
+
+    enrollment = await EnrollmentRegistration(
+        enrollment_repo,
+        student_repo,
+        course_repo,
+    ).enroll(current_user.id, course_id, payload)
     return enrollment_to_public(enrollment)
 
 
-@router.get("/enrollments", response_model=list[EnrollmentPublic])
+def _page(items: list, total: int, skip: int, limit: int) -> PaginatedResponse:
+    return PaginatedResponse(items=items, total=total, skip=clamp_skip(skip), limit=clamp_limit(limit))
+
+
+async def _course_access(student_id: str, course_id: str, provided, enrollment_repo: EnrollmentRepository):
+    """One eligible enrollment for this course.
+
+    A list is only accepted from direct tests that already selected the rows.
+    The HTTP dependency passes None, which becomes a single find_one.
+    """
+    if isinstance(provided, list):
+        return next((item for item in provided if getattr(item, "course_id", None) == course_id), None)
+    return await enrollment_repo.get_access_enrollment(student_id, course_id)
+
+
+_GRADE_POINTS = {
+    "A+": 4.0, "A": 4.0, "A-": 3.7, "B+": 3.3, "B": 3.0, "B-": 2.7,
+    "C+": 2.3, "C": 2.0, "C-": 1.7, "D+": 1.3, "D": 1.0, "D-": 0.7, "F": 0.0,
+}
+
+
+async def _performance_summaries(result_repo: ResultRepository, student_id: str):
+    """Build GPA inputs from one aggregation.
+
+    The database returns one row per eligible enrollment, one grade count, and
+    at most ten recent results. Percentage, stored-grade fallback, highest
+    percentage, and the later issued_date tie are applied in that aggregation.
+    """
+    raw = await result_repo.summarize_for_student(student_id)
+    names = {
+        oid_str(row["_id"]): row.get("recent_assessment")
+        for row in raw.get("recent_names") or []
+    }
+    summaries: dict[str, dict] = {}
+    for row in raw.get("by_enrollment") or []:
+        enrollment_id = oid_str(row["_id"])
+        summaries[enrollment_id] = {
+            "sum": row.get("total_percentage") or 0.0,
+            "count": row.get("count") or 0,
+            "final_grade": row.get("final_grade"),
+            "recent_assessment": names.get(enrollment_id),
+        }
+    grade_distribution = {
+        row["_id"]: row.get("count") or 0
+        for row in raw.get("distribution") or []
+        if row.get("_id") is not None
+    }
+    recent = [
+        SimpleNamespace(
+            id=oid_str(row["_id"]),
+            course_id=oid_str(row["course_id"]) if row.get("course_id") is not None else None,
+            assessment_name=row.get("assessment_name"),
+            assessment_type=row.get("assessment_type"),
+            percentage=row.get("percentage") or 0.0,
+            grade=row.get("resolved_grade"),
+            issued_date=row.get("issued_date"),
+        )
+        for row in raw.get("recent") or []
+    ]
+    return summaries, grade_distribution, recent
+
+
+def _result_public(result) -> ResultPublic:
+    return ResultPublic(
+        id=result.id,
+        student_id=result.student_id,
+        course_id=result.course_id,
+        enrollment_id=result.enrollment_id,
+        assessment_type=result.assessment_type,
+        assessment_name=result.assessment_name,
+        marks_obtained=result.marks_obtained,
+        total_marks=result.total_marks,
+        percentage=result.percentage,
+        grade=result.grade,
+        feedback=result.feedback,
+        issued_by=result.issued_by,
+        issued_date=result.issued_date,
+        created_at=result.created_at,
+        updated_at=result.updated_at,
+    )
+
+
+@router.get("/enrollments", response_model=PaginatedResponse[EnrollmentPublic])
 async def get_my_enrollments(
     current_user: User = Depends(get_current_user),
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
     student_repo: StudentRepository = Depends(get_student_repository),
-) -> list[EnrollmentPublic]:
-    """Get all enrollments for current user."""
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
+) -> PaginatedResponse[EnrollmentPublic]:
+    """Page the current user's enrollment history. The array is one page, and total is the full count."""
     student = await student_repo.get_by_user_id(current_user.id)
     if not student:
-        return []
-    
-    enrollments = await enrollment_repo.get_by_student(student.id)
-    return [enrollment_to_public(e) for e in enrollments]
+        return _page([], 0, skip, limit)
+    enrollments, total = await enrollment_repo.page_for_student(student.id, skip=skip, limit=limit)
+    return _page([enrollment_to_public(e) for e in enrollments], total, skip, limit)
 
 
 @router.get("/dashboard")
@@ -164,51 +226,70 @@ async def get_student_dashboard(
     instructor_repo: InstructorRepository = Depends(get_instructor_repository),
     user_repo: UserRepository = Depends(get_user_repository),
     material_service: CourseMaterialService = Depends(get_course_material_service),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
 ) -> dict:
-    """Get enriched dashboard data for enrolled student: enrollments with course, instructor name, materials count."""
+    """Current courses for the student. enrollments is one page; total is the full current count."""
     student = await student_repo.get_by_user_id(current_user.id)
     if not student:
-        return {"enrollments": [], "mentors": []}
+        return {"enrollments": [], "mentors": [], "total": 0, "skip": clamp_skip(skip), "limit": clamp_limit(limit)}
 
-    enrollments = await enrollment_repo.get_by_student(student.id)
+    enrollments, total = await enrollment_repo.page_current_for_student(student.id, skip=skip, limit=limit)
+    current = [
+        e for e in enrollments
+        if e.verified_by_admin and getattr(e, "status", "active") == "active"
+    ]
+    courses = await course_repo.load_by_ids([e.course_id for e in current])
+    instructors = await instructor_repo.load_by_ids(
+        [course.instructor_id for course in courses.values() if course.instructor_id]
+    )
+    users = await user_repo.load_by_ids(
+        [instructor.user_id for instructor in instructors.values() if getattr(instructor, "user_id", None)]
+    )
+    materials_by_course = await material_service.published_for_courses(list(courses))
     result = []
-    instructor_ids_seen = set()
     mentors_map = {}
+    seen_courses: set[str] = set()
 
-    for e in enrollments:
-        if not e.verified_by_admin:
+    for e in current:
+        if e.course_id in seen_courses:
             continue
-        course = await course_repo.get_by_id(e.course_id)
-        if not course:
+        seen_courses.add(e.course_id)
+        course = courses.get(e.course_id)
+        if course is None:
             continue
         instructor_name = "Instructor"
         instructor_specialization = ""
-        if course.instructor_id:
-            instructor = await instructor_repo.get_by_id(course.instructor_id)
-            if instructor:
-                user = await user_repo.get_by_id(instructor.user_id)
-                instructor_name = user.full_name or user.email if user else "Instructor"
-                instructor_specialization = instructor.specialization or ""
-                if course.instructor_id not in instructor_ids_seen:
-                    instructor_ids_seen.add(course.instructor_id)
-                    mentors_map[course.instructor_id] = {
-                        "id": course.instructor_id,
-                        "name": instructor_name,
-                        "specialization": instructor_specialization,
-                        "user_id": instructor.user_id,
-                        "course_id": e.course_id,
-                        "course_title": course.title,
-                        "enrollment_date": e.enrollment_date.isoformat() if e.enrollment_date else None,
-                    }
+        instructor = instructors.get(course.instructor_id) if course.instructor_id else None
+        user = users.get(instructor.user_id) if instructor is not None and record_is_active(instructor) else None
+        if instructor is not None and user is not None and record_is_active(user):
+            instructor_name = user.full_name or user.email or "Instructor"
+            instructor_specialization = instructor.specialization or ""
+            if course.instructor_id not in mentors_map:
+                mentors_map[course.instructor_id] = {
+                    "id": course.instructor_id,
+                    "name": instructor_name,
+                    "specialization": instructor_specialization,
+                    "user_id": instructor.user_id,
+                    "course_id": e.course_id,
+                    "course_title": course.title,
+                    "enrollment_date": e.enrollment_date.isoformat() if e.enrollment_date else None,
+                }
 
-        materials = await material_service.get_course_materials(e.course_id, published_only=True)
-        total_materials = len(materials)
+        materials = materials_by_course.get(e.course_id, [])
+        seen_material_ids: set[str] = set()
+        unique_materials = []
+        for material in materials:
+            if material.id in seen_material_ids:
+                continue
+            seen_material_ids.add(material.id)
+            unique_materials.append(material)
+        total_materials = len(unique_materials)
         progress = e.progress_percentage or 0
         watched = max(0, min(total_materials, round(progress / 100 * total_materials))) if total_materials else 0
 
-        # First video thumbnail for Continue Watching cards (YouTube only)
         thumbnail_url = None
-        video_materials = [m for m in materials if m.material_type == "video" and m.content_url]
+        video_materials = [m for m in unique_materials if m.material_type == "video" and m.content_url]
         if video_materials:
             first_video = sorted(video_materials, key=lambda m: m.order or 0)[0]
             url = (first_video.content_url or "").strip()
@@ -235,7 +316,13 @@ async def get_student_dashboard(
             "enrollment_date": e.enrollment_date.isoformat() if e.enrollment_date else None,
         })
 
-    return {"enrollments": result, "mentors": list(mentors_map.values())}
+    return {
+        "enrollments": result,
+        "mentors": list(mentors_map.values()),
+        "total": total,
+        "skip": clamp_skip(skip),
+        "limit": clamp_limit(limit),
+    }
 
 
 @router.post("/enrollments/{enrollment_id}/payment-receipt", response_model=EnrollmentPublic)
@@ -258,7 +345,19 @@ async def upload_payment_receipt(
     if not student or enrollment.student_id != student.id:
         raise ForbiddenError("You can only upload receipts for your own enrollments")
     
+    from app.services.audit_service import recover_pending_decision, commit_required_decision
+
+    pending = enrollment.audit_pending if isinstance(enrollment.audit_pending, dict) else None
+
+    async def clear_pending():
+        return await enrollment_repo.update(enrollment.id, {"audit_pending": None})
+
+    if pending:
+        await recover_pending_decision(audit, enrollment, clear_pending)
+        enrollment = await enrollment_repo.get_by_id(enrollment_id) or enrollment
     current_state = workflow_state(enrollment)
+    if current_state == RECEIPT_UPLOADED and enrollment.payment_receipt_url == payload.receipt_url:
+        return enrollment_to_public(enrollment)
     assert_enrollment_transition(
         current_user.role,
         current_state,
@@ -267,21 +366,19 @@ async def upload_payment_receipt(
     )
     updates = enrollment_transition_updates(enrollment, RECEIPT_UPLOADED, actor_id=current_user.id)
     updates["payment_receipt_url"] = payload.receipt_url
-    updated_enrollment = await enrollment_repo.update(enrollment_id, updates)
-    if updated_enrollment:
-        await audit.record(
-            action="enrollment.receipt_uploaded",
-            entity_type="enrollment",
-            entity_id=enrollment.id,
-            previous=enrollment,
-            current=updated_enrollment,
-            actor_id=current_user.id,
-            actor_role=current_user.role,
-        )
-    
+    updated_enrollment = await commit_required_decision(
+        audit,
+        lambda data: enrollment_repo.update(enrollment_id, data),
+        action="enrollment.receipt_uploaded",
+        entity_type="enrollment",
+        entity_id=enrollment.id,
+        actor_id=current_user.id,
+        actor_role=current_user.role,
+        previous=enrollment,
+        updates=updates,
+    )
     if not updated_enrollment:
         raise NotFoundError("Failed to update enrollment")
-    
     return enrollment_to_public(updated_enrollment)
 
 
@@ -328,7 +425,7 @@ async def download_enrollment_card(
     if not enrollment.verified_by_admin:
         raise ForbiddenError("Enrollment card is available after admin payment verification")
 
-    course = await course_repo.get_by_id(enrollment.course_id)
+    course = await course_repo.get_including_archived(enrollment.course_id)
     if not course:
         raise NotFoundError("Course not found")
 
@@ -360,71 +457,36 @@ async def download_enrollment_card(
 
 # ==================== Results ====================
 
-@router.get("/results/{course_id}", response_model=list[ResultPublic])
+@router.get("/results/{course_id}", response_model=PaginatedResponse[ResultPublic])
 async def get_my_results(
     course_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     result_repo: ResultRepository = Depends(get_result_repository),
-) -> list[ResultPublic]:
-    """Get all results for current user in a course. Requires admin-verified enrollment."""
-    student, verified_enrollments = verified_data
-    
-    results = await result_repo.get_by_student_and_course(student.id, course_id)
-    return [
-        ResultPublic(
-            id=r.id,
-            student_id=r.student_id,
-            course_id=r.course_id,
-            enrollment_id=r.enrollment_id,
-            assessment_type=r.assessment_type,
-            assessment_name=r.assessment_name,
-            marks_obtained=r.marks_obtained,
-            total_marks=r.total_marks,
-            percentage=r.percentage,
-            grade=r.grade,
-            feedback=r.feedback,
-            issued_by=r.issued_by,
-            issued_date=r.issued_date,
-            created_at=r.created_at,
-            updated_at=r.updated_at,
-        )
-        for r in results
-    ]
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[ResultPublic]:
+    """Page results for the current user in one course they can access."""
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return _page([], 0, skip, limit)
+    results, total = await result_repo.page_for_student(
+        student.id, course_id=course_id, skip=skip, limit=limit
+    )
+    return _page([_result_public(result) for result in results], total, skip, limit)
 
 
-@router.get("/results", response_model=dict[str, list[ResultPublic]])
+@router.get("/results", response_model=PaginatedResponse[ResultPublic])
 async def get_all_my_results(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     result_repo: ResultRepository = Depends(get_result_repository),
-) -> dict[str, list[ResultPublic]]:
-    """Get all results for current user, grouped by course. Requires admin-verified enrollment."""
-    student, enrollments = verified_data
-    all_results = {}
-    
-    for enrollment in enrollments:
-        results = await result_repo.get_by_enrollment(enrollment.id)
-        all_results[enrollment.course_id] = [
-            ResultPublic(
-                id=r.id,
-                student_id=r.student_id,
-                course_id=r.course_id,
-                enrollment_id=r.enrollment_id,
-                assessment_type=r.assessment_type,
-                assessment_name=r.assessment_name,
-                marks_obtained=r.marks_obtained,
-                total_marks=r.total_marks,
-                percentage=r.percentage,
-                grade=r.grade,
-                feedback=r.feedback,
-                issued_by=r.issued_by,
-                issued_date=r.issued_date,
-                created_at=r.created_at,
-                updated_at=r.updated_at,
-            )
-            for r in results
-        ]
-    
-    return all_results
+) -> PaginatedResponse[ResultPublic]:
+    """Page every stored result for the current user, including historical rows."""
+    student, _enrollments = verified_data
+    results, total = await result_repo.page_for_student(student.id, skip=skip, limit=limit)
+    return _page([_result_public(result) for result in results], total, skip, limit)
 
 
 # ==================== Attendance ====================
@@ -437,10 +499,13 @@ async def list_my_attendance_corrections(
     current_user: User = Depends(get_current_user),
     student_repo: StudentRepository = Depends(get_student_repository),
     service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> PaginatedResponse[AttendanceCorrectionPublic]:
     """List correction requests for the signed-in student."""
     student = await student_repo.get_by_user_id(current_user.id)
     if not student:
+        return PaginatedResponse(items=[], total=0, skip=skip, limit=limit)
+    if course_id and await enrollment_repo.get_access_enrollment(student.id, course_id) is None:
         return PaginatedResponse(items=[], total=0, skip=skip, limit=limit)
     corrections, total = await service.list_corrections(
         skip=skip,
@@ -467,11 +532,20 @@ async def request_attendance_correction(
     current_user: User = Depends(get_current_user),
     student_repo: StudentRepository = Depends(get_student_repository),
     service: AttendanceCorrectionService = Depends(get_attendance_correction_service),
+    attendance_repo: AttendanceRepository = Depends(get_attendance_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> AttendanceCorrectionPublic:
     """Ask for a correction of the signed-in student's own attendance mark."""
     student = await student_repo.get_by_user_id(current_user.id)
     if not student:
         raise ForbiddenError("A student profile is required to request an attendance correction")
+    attendance = await attendance_repo.get_by_id(attendance_id)
+    if (
+        attendance is None
+        or attendance.student_id != student.id
+        or await enrollment_repo.get_access_enrollment(student.id, attendance.course_id) is None
+    ):
+        raise NotFoundError("Attendance not found")
     correction = await service.request_correction(
         attendance_id=attendance_id,
         student_id=student.id,
@@ -482,20 +556,24 @@ async def request_attendance_correction(
     return correction_to_public(correction)
 
 
-@router.get("/attendance/{course_id}", response_model=list[AttendancePublic])
+@router.get("/attendance/{course_id}", response_model=PaginatedResponse[AttendancePublic])
 async def get_my_attendance(
     course_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     attendance_repo: AttendanceRepository = Depends(get_attendance_repository),
     student_repo: StudentRepository = Depends(get_student_repository),
-) -> list[AttendancePublic]:
-    """Get all attendance records for current user in a course."""
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[AttendancePublic]:
+    """Page attendance for a course the signed-in student can access."""
     student = await student_repo.get_by_user_id(current_user.id)
-    if not student:
-        return []
-    
-    attendances = await attendance_repo.get_by_student_and_course(student.id, course_id)
-    return [
+    if not student or await enrollment_repo.get_access_enrollment(student.id, course_id) is None:
+        return _page([], 0, skip, limit)
+    attendances, total = await attendance_repo.page_for_student_course(
+        student.id, course_id, skip=skip, limit=limit
+    )
+    return _page([
         AttendancePublic(
             id=a.id,
             student_id=a.student_id,
@@ -512,7 +590,7 @@ async def get_my_attendance(
             updated_at=a.updated_at,
         )
         for a in attendances
-    ]
+    ], total, skip, limit)
 
 
 @router.get("/attendance/{course_id}/stats", response_model=dict)
@@ -520,9 +598,12 @@ async def get_attendance_stats(
     course_id: str,
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     attendance_repo: AttendanceRepository = Depends(get_attendance_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> dict:
-    """Get attendance statistics for current user in a course. Requires admin-verified enrollment."""
-    student, _ = verified_data
+    """Attendance statistics for one course the student can access."""
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return {"present": 0, "absent": 0, "late": 0, "excused": 0, "total": 0, "percentage": 0.0}
     stats = await attendance_repo.get_attendance_stats(student.id, course_id)
     total = stats.get("total", 0)
     present = stats.get("present", 0)
@@ -537,15 +618,17 @@ async def submit_absence_reason(
     payload: AbsenceReasonSubmit,
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     attendance_service: AttendanceService = Depends(get_attendance_service),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> AttendancePublic:
-    """Submit absence reason for an attendance record. Requires admin-verified enrollment."""
-    student, _ = verified_data
-    
-    attendance = await attendance_service.submit_absence_reason(attendance_id, payload.absence_reason)
-    
-    # Verify attendance belongs to current user
-    if attendance.student_id != student.id:
+    """Submit an absence reason for the student's own eligible course."""
+    student, provided = verified_data
+    attendance = await attendance_service.get_attendance(attendance_id)
+    if (
+        attendance.student_id != student.id
+        or await _course_access(student.id, attendance.course_id, provided, enrollment_repo) is None
+    ):
         raise NotFoundError("Attendance not found")
+    attendance = await attendance_service.submit_absence_reason(attendance_id, payload.absence_reason)
     
     return AttendancePublic(
         id=attendance.id,
@@ -566,16 +649,17 @@ async def submit_absence_reason(
 
 # ==================== Certificates ====================
 
-@router.get("/certificates", response_model=list[CertificatePublic])
+@router.get("/certificates", response_model=PaginatedResponse[CertificatePublic])
 async def get_my_certificates(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     certificate_repo: CertificateRepository = Depends(get_certificate_repository),
-) -> list[CertificatePublic]:
-    """Get all certificates for current user. Requires admin-verified enrollment."""
+) -> PaginatedResponse[CertificatePublic]:
+    """Page certificates for the current user."""
     student, _ = verified_data
-    
-    certificates = await certificate_repo.get_by_student(student.id)
-    return [
+    certificates, total = await certificate_repo.page_for_student(student.id, skip=skip, limit=limit)
+    return _page([
         CertificatePublic(
             id=c.id,
             student_id=c.student_id,
@@ -592,7 +676,7 @@ async def get_my_certificates(
             updated_at=c.updated_at,
         )
         for c in certificates
-    ]
+    ], total, skip, limit)
 
 
 @router.get("/certificates/{course_id}", response_model=CertificatePublic | None)
@@ -600,10 +684,11 @@ async def get_course_certificate(
     course_id: str,
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     certificate_repo: CertificateRepository = Depends(get_certificate_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> CertificatePublic | None:
     """Get certificate for current user in a specific course. Requires admin-verified enrollment."""
-    student, verified_enrollments = verified_data
-    if not any(e.course_id == course_id for e in verified_enrollments):
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
         return None
     certificate = await certificate_repo.get_by_student_and_course(student.id, course_id)
     if not certificate:
@@ -628,23 +713,29 @@ async def get_course_certificate(
 
 # ==================== Scholarships ====================
 
-@router.get("/scholarships", response_model=list[ScholarshipStatus])
+@router.get("/scholarships", response_model=PaginatedResponse[ScholarshipStatus])
 async def get_my_scholarships(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     scholarship_service: ScholarshipService = Depends(get_scholarship_service),
     course_repo: CourseRepository = Depends(get_course_repository),
-) -> list[ScholarshipStatus]:
-    """Get all scholarships for current user with status information. Requires admin-verified enrollment."""
+) -> PaginatedResponse[ScholarshipStatus]:
+    """Page scholarships for the current user. Course titles are loaded in one batch."""
     student, _ = verified_data
-    
-    scholarships = await scholarship_service.get_student_scholarships(student.id)
-    
+    scholarships, total = await scholarship_service.list_scholarships(
+        skip=skip,
+        limit=limit,
+        student_id=student.id,
+    )
+    courses = await course_repo.load_by_ids(
+        [item.course_id for item in scholarships if item.course_id],
+        include_archived=True,
+    )
     result = []
     for scholarship in scholarships:
-        course_title = None
-        if scholarship.course_id:
-            course = await course_repo.get_by_id(scholarship.course_id)
-            course_title = course.title if course else None
+        course = courses.get(scholarship.course_id) if scholarship.course_id else None
+        course_title = course.title if course else None
         
         # Calculate days remaining
         days_remaining = None
@@ -673,22 +764,26 @@ async def get_my_scholarships(
             )
         )
     
-    return result
+    return _page(result, total, skip, limit)
 
 
-@router.get("/scholarships/{course_id}", response_model=list[ScholarshipPublic])
+@router.get("/scholarships/{course_id}", response_model=PaginatedResponse[ScholarshipPublic])
 async def get_course_scholarships(
     course_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     scholarship_service: ScholarshipService = Depends(get_scholarship_service),
-) -> list[ScholarshipPublic]:
-    """Get scholarships for current user in a specific course. Requires admin-verified enrollment."""
-    student, verified_enrollments = verified_data
-    if not any(e.course_id == course_id for e in verified_enrollments):
-        return []
-    
-    scholarships = await scholarship_service.get_student_course_scholarships(student.id, course_id)
-    return [
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[ScholarshipPublic]:
+    """Page scholarships for the current user in one course."""
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return _page([], 0, skip, limit)
+    scholarships, total = await scholarship_service.page_student_course_scholarships(
+        student.id, course_id, skip=skip, limit=limit
+    )
+    return _page([
         ScholarshipPublic(
             id=s.id,
             student_id=s.student_id,
@@ -710,7 +805,7 @@ async def get_course_scholarships(
             updated_at=s.updated_at,
         )
         for s in scholarships
-    ]
+    ], total, skip, limit)
 
 
 @router.get("/scholarships/{scholarship_id}/details", response_model=ScholarshipPublic)
@@ -752,18 +847,26 @@ async def get_scholarship_details(
 
 # ==================== Course Materials ====================
 
-@router.get("/courses/{course_id}/materials", response_model=list[CourseMaterialPublic])
+@router.get("/courses/{course_id}/materials", response_model=PaginatedResponse[CourseMaterialPublic])
 async def get_course_materials(
     course_id: str,
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     material_service: CourseMaterialService = Depends(get_course_material_service),
-) -> list[CourseMaterialPublic]:
-    """Get all published materials for a course. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    if not any(e.course_id == course_id for e in verified_enrollments):
-        return []
-    materials = await material_service.get_course_materials(course_id, published_only=True)
-    return [
+    course_repo: CourseRepository = Depends(get_course_repository),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[CourseMaterialPublic]:
+    """Page published materials for a course."""
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return _page([], 0, skip, limit)
+    if not await _course_is_current(course_repo, course_id):
+        return _page([], 0, skip, limit)
+    materials, total = await material_service.list_course_materials(
+        course_id, skip=skip, limit=limit, published_only=True
+    )
+    return _page([
         CourseMaterialPublic(
             id=m.id,
             course_id=m.course_id,
@@ -782,23 +885,31 @@ async def get_course_materials(
             updated_at=m.updated_at,
         )
         for m in materials
-    ]
+    ], total, skip, limit)
 
 
 # ==================== Assignments ====================
 
-@router.get("/courses/{course_id}/assignments", response_model=list[AssignmentPublic])
+@router.get("/courses/{course_id}/assignments", response_model=PaginatedResponse[AssignmentPublic])
 async def get_course_assignments(
     course_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     assignment_service: AssignmentService = Depends(get_assignment_service),
-) -> list[AssignmentPublic]:
-    """Get all published assignments for a course. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    if not any(e.course_id == course_id for e in verified_enrollments):
-        return []
-    assignments = await assignment_service.get_course_assignments(course_id, published_only=True)
-    return [
+    course_repo: CourseRepository = Depends(get_course_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[AssignmentPublic]:
+    """Page published assignments for a course."""
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return _page([], 0, skip, limit)
+    if not await _course_is_current(course_repo, course_id):
+        return _page([], 0, skip, limit)
+    assignments, total = await assignment_service.list_course_assignments(
+        course_id, skip=skip, limit=limit, published_only=True
+    )
+    return _page([
         AssignmentPublic(
             id=a.id,
             course_id=a.course_id,
@@ -814,7 +925,7 @@ async def get_course_assignments(
             updated_at=a.updated_at,
         )
         for a in assignments
-    ]
+    ], total, skip, limit)
 
 
 @router.get("/assignments/{assignment_id}/submission", response_model=AssignmentSubmissionPublic | None)
@@ -822,11 +933,12 @@ async def get_my_submission(
     assignment_id: str,
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     assignment_service: AssignmentService = Depends(get_assignment_service),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> AssignmentSubmissionPublic | None:
     """Get current user's submission for an assignment. Requires admin-verified enrollment."""
-    student, verified_enrollments = verified_data
+    student, provided = verified_data
     assignment = await assignment_service.get_assignment(assignment_id)
-    enrollment = next((e for e in verified_enrollments if e.course_id == assignment.course_id), None)
+    enrollment = await _course_access(student.id, assignment.course_id, provided, enrollment_repo)
     if not enrollment:
         return None
     
@@ -859,11 +971,12 @@ async def submit_assignment(
     payload: AssignmentSubmissionCreate,
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     assignment_service: AssignmentService = Depends(get_assignment_service),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> AssignmentSubmissionPublic:
     """Submit an assignment. Requires admin-verified enrollment."""
-    student, verified_enrollments = verified_data
+    student, provided = verified_data
     assignment = await assignment_service.get_assignment(assignment_id)
-    enrollment = next((e for e in verified_enrollments if e.course_id == assignment.course_id), None)
+    enrollment = await _course_access(student.id, assignment.course_id, provided, enrollment_repo)
     if not enrollment:
         raise NotFoundError("Not enrolled in this course")
     
@@ -895,84 +1008,90 @@ async def submit_assignment(
 
 # ==================== Live Sessions ====================
 
-@router.get("/courses/{course_id}/sessions", response_model=list[LiveSessionPublic])
+def _session_public(session) -> LiveSessionPublic:
+    return LiveSessionPublic(
+        id=session.id,
+        course_id=session.course_id,
+        title=session.title,
+        description=session.description,
+        session_type=session.session_type,
+        start_time=session.start_time,
+        end_time=session.end_time,
+        meeting_link=session.meeting_link,
+        location=session.location,
+        instructor_id=session.instructor_id,
+        max_participants=session.max_participants,
+        recording_url=session.recording_url,
+        is_recorded=session.is_recorded,
+        status=session.status,
+        created_by=session.created_by,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+@router.get("/courses/{course_id}/sessions", response_model=PaginatedResponse[LiveSessionPublic])
 async def get_course_sessions(
     course_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     session_service: LiveSessionService = Depends(get_live_session_service),
-) -> list[LiveSessionPublic]:
-    """Get all live sessions for a course. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    if not any(e.course_id == course_id for e in verified_enrollments):
-        return []
-    sessions = await session_service.get_course_sessions(course_id)
-    return [
-        LiveSessionPublic(
-            id=s.id,
-            course_id=s.course_id,
-            title=s.title,
-            description=s.description,
-            session_type=s.session_type,
-            start_time=s.start_time,
-            end_time=s.end_time,
-            meeting_link=s.meeting_link,
-            location=s.location,
-            instructor_id=s.instructor_id,
-            max_participants=s.max_participants,
-            recording_url=s.recording_url,
-            is_recorded=s.is_recorded,
-            status=s.status,
-            created_by=s.created_by,
-            created_at=s.created_at,
-            updated_at=s.updated_at,
-        )
-        for s in sessions
-    ]
+    course_repo: CourseRepository = Depends(get_course_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[LiveSessionPublic]:
+    """Page live sessions for a course."""
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return _page([], 0, skip, limit)
+    if not await _course_is_current(course_repo, course_id):
+        return _page([], 0, skip, limit)
+    sessions, total = await session_service.list_course_sessions(course_id, skip=skip, limit=limit)
+    return _page([_session_public(session) for session in sessions], total, skip, limit)
 
 
-@router.get("/sessions/upcoming", response_model=list[LiveSessionPublic])
+@router.get("/sessions/upcoming", response_model=PaginatedResponse[LiveSessionPublic])
 async def get_upcoming_sessions(
     course_id: str | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     session_service: LiveSessionService = Depends(get_live_session_service),
-) -> list[LiveSessionPublic]:
-    """Get upcoming live sessions. Requires admin-verified enrollment."""
-    sessions = await session_service.get_upcoming_sessions(course_id)
-    return [
-        LiveSessionPublic(
-            id=s.id,
-            course_id=s.course_id,
-            title=s.title,
-            description=s.description,
-            session_type=s.session_type,
-            start_time=s.start_time,
-            end_time=s.end_time,
-            meeting_link=s.meeting_link,
-            location=s.location,
-            instructor_id=s.instructor_id,
-            max_participants=s.max_participants,
-            recording_url=s.recording_url,
-            is_recorded=s.is_recorded,
-            status=s.status,
-            created_by=s.created_by,
-            created_at=s.created_at,
-            updated_at=s.updated_at,
-        )
-        for s in sessions
-    ]
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[LiveSessionPublic]:
+    """Page upcoming sessions for the student's operational courses."""
+    student, provided = verified_data
+    if isinstance(provided, list):
+        course_ids = [course_id] if course_id else [enrollment.course_id for enrollment in provided]
+        allowed = {enrollment.course_id for enrollment in provided}
+    else:
+        allowed = set(await enrollment_repo.verified_course_ids(student.id))
+        course_ids = [course_id] if course_id else list(allowed)
+    if course_id and course_id not in allowed:
+        return _page([], 0, skip, limit)
+    sessions, total = await session_service.page_upcoming_for_courses(
+        course_ids, skip=skip, limit=limit
+    )
+    return _page([_session_public(session) for session in sessions], total, skip, limit)
 
 
 # ==================== Announcements ====================
 
-@router.get("/announcements", response_model=list[AnnouncementPublic])
+@router.get("/announcements", response_model=PaginatedResponse[AnnouncementPublic])
 async def get_announcements(
     course_id: str | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     announcement_service: AnnouncementService = Depends(get_announcement_service),
-) -> list[AnnouncementPublic]:
-    """Get announcements (course-specific or system-wide). Requires admin-verified enrollment."""
-    announcements = await announcement_service.get_course_announcements(course_id, published_only=True)
-    return [
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[AnnouncementPublic]:
+    """Page published announcements. A course id requires access to that course."""
+    student, provided = verified_data
+    if course_id and await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return _page([], 0, skip, limit)
+    announcements, total = await announcement_service.page_published(course_id, skip=skip, limit=limit)
+    return _page([
         AnnouncementPublic(
             id=a.id,
             course_id=a.course_id,
@@ -987,7 +1106,7 @@ async def get_announcements(
             updated_at=a.updated_at,
         )
         for a in announcements
-    ]
+    ], total, skip, limit)
 
 
 # ==================== Course Progress ====================
@@ -999,33 +1118,33 @@ async def get_course_progress(
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
     material_service: CourseMaterialService = Depends(get_course_material_service),
     assignment_service: AssignmentService = Depends(get_assignment_service),
+    course_repo: CourseRepository = Depends(get_course_repository),
 ) -> dict:
     """Get detailed course progress for an enrollment. Requires admin-verified enrollment."""
-    student, verified_enrollments = verified_data
-    enrollment = await enrollment_repo.get_by_id(enrollment_id)
-    if not enrollment or enrollment.student_id != student.id:
+    student, _provided = verified_data
+    enrollment = await enrollment_repo.get_owned_verified(student.id, enrollment_id)
+    if enrollment is None:
         raise NotFoundError("Enrollment not found")
-    if not any(e.id == enrollment_id for e in verified_enrollments):
-        raise NotFoundError("Enrollment not found")
-    
-    # Get course materials and assignments
-    materials = await material_service.get_course_materials(enrollment.course_id, published_only=True)
-    assignments = await assignment_service.get_course_assignments(enrollment.course_id, published_only=True)
-    
-    # Calculate progress based on materials and assignments
-    total_items = len(materials) + len(assignments)
-    completed_items = 0
-    
-    # For now, progress is based on enrollment progress_percentage
-    # In future, can track individual material/assignment completion
+
+    if await _course_is_current(course_repo, enrollment.course_id):
+        total_materials = await material_service.count_published(enrollment.course_id)
+        total_assignments = await assignment_service.count_published(enrollment.course_id)
+    else:
+        total_materials = 0
+        total_assignments = 0
+
+    # Progress percentage stays the value stored on the enrollment.
+    # Counts use the same published, active filter as the course content pages.
     progress_percentage = enrollment.progress_percentage
-    
+    total_items = total_materials + total_assignments
+    completed_items = 0
+
     return {
         "enrollment_id": enrollment.id,
         "course_id": enrollment.course_id,
         "progress_percentage": progress_percentage,
-        "total_materials": len(materials),
-        "total_assignments": len(assignments),
+        "total_materials": total_materials,
+        "total_assignments": total_assignments,
         "total_items": total_items,
         "completed_items": completed_items,
         "status": enrollment.status,
@@ -1042,11 +1161,9 @@ async def update_course_progress(
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> EnrollmentPublic:
     """Update course progress for an enrollment. Requires admin-verified enrollment."""
-    student, verified_enrollments = verified_data
-    enrollment = await enrollment_repo.get_by_id(enrollment_id)
-    if not enrollment or enrollment.student_id != student.id:
-        raise NotFoundError("Enrollment not found")
-    if not any(e.id == enrollment_id for e in verified_enrollments):
+    student, _provided = verified_data
+    enrollment = await enrollment_repo.get_owned_verified(student.id, enrollment_id)
+    if enrollment is None:
         raise NotFoundError("Enrollment not found")
     
     # Validate progress percentage
@@ -1084,60 +1201,66 @@ async def update_course_progress(
 
 @router.get("/performance/dashboard", response_model=dict)
 async def get_performance_dashboard(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     result_repo: ResultRepository = Depends(get_result_repository),
     course_repo: CourseRepository = Depends(get_course_repository),
     attendance_repo: AttendanceRepository = Depends(get_attendance_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> dict:
-    """Get comprehensive performance dashboard for current user. Requires admin-verified enrollment."""
-    student, enrollments = verified_data
-    
-    # Get all results
-    all_results = []
+    """Performance summary. course_performance and attendance_summary are one page of enrollments.
+
+    overall_gpa, grade_distribution, and recent_results cover every verified enrollment.
+    Attendance percentage is present divided by total marks, matching the course stats route.
+    GPA and grade distribution come from one aggregation. Recent results are at most ten rows.
+    """
+    student, _provided = verified_data
+    page_start = clamp_skip(skip)
+    page_size = clamp_limit(limit)
+    status_counts = await enrollment_repo.count_verified_statuses(student.id)
+    page_enrollments, verified_total = await enrollment_repo.page_verified(
+        student.id, skip=page_start, limit=page_size
+    )
+    summaries, grade_distribution, recent_results = await _performance_summaries(
+        result_repo, student.id
+    )
+
+    courses = await course_repo.load_by_ids(
+        [enrollment.course_id for enrollment in page_enrollments],
+        include_archived=True,
+    )
+    attendance_by_course = await attendance_repo.stats_for_courses(
+        student.id,
+        [enrollment.course_id for enrollment in page_enrollments],
+    )
+
     course_performance = []
-    grade_points = {"A+": 4.0, "A": 4.0, "A-": 3.7, "B+": 3.3, "B": 3.0, "B-": 2.7,
-                    "C+": 2.3, "C": 2.0, "C-": 1.7, "D+": 1.3, "D": 1.0, "D-": 0.7, "F": 0.0}
-    
     total_grade_points = 0.0
     total_courses_with_grades = 0
-    grade_distribution = {}
-    
-    for enrollment in enrollments:
-        course = await course_repo.get_by_id(enrollment.course_id)
-        course_results = await result_repo.get_by_enrollment(enrollment.id)
-        all_results.extend(course_results)
-        
-        # Calculate course average
-        if course_results:
-            course_avg = sum(r.percentage for r in course_results) / len(course_results)
-            # Get final grade (use the highest assessment or average)
-            final_grade = max(course_results, key=lambda r: r.percentage).grade
-            grade_point = grade_points.get(final_grade, 0.0)
-            total_grade_points += grade_point
-            total_courses_with_grades += 1
-            
-            # Count grades
-            for result in course_results:
-                grade = result.grade
-                grade_distribution[grade] = grade_distribution.get(grade, 0) + 1
-            
-            course_performance.append({
-                "course_id": enrollment.course_id,
-                "course_title": course.title if course else "Unknown",
-                "enrollment_status": enrollment.status,
-                "progress_percentage": enrollment.progress_percentage,
-                "average_percentage": round(course_avg, 2),
-                "final_grade": final_grade,
-                "grade_point": grade_point,
-                "total_assessments": len(course_results),
-                "recent_assessment": max(course_results, key=lambda r: r.issued_date).assessment_name if course_results else None,
-            })
-    
-    # Calculate overall GPA
+    for bucket in summaries.values():
+        total_grade_points += _GRADE_POINTS.get(bucket["final_grade"], 0.0)
+        total_courses_with_grades += 1
+    for enrollment in page_enrollments:
+        bucket = summaries.get(enrollment.id)
+        if not bucket:
+            continue
+        course = courses.get(enrollment.course_id)
+        course_avg = bucket["sum"] / bucket["count"]
+        final_grade = bucket["final_grade"]
+        course_performance.append({
+            "course_id": enrollment.course_id,
+            "course_title": course.title if course else "Unknown",
+            "enrollment_status": enrollment.status,
+            "progress_percentage": enrollment.progress_percentage,
+            "average_percentage": round(course_avg, 2),
+            "final_grade": final_grade,
+            "grade_point": _GRADE_POINTS.get(final_grade, 0.0),
+            "total_assessments": bucket["count"],
+            "recent_assessment": bucket["recent_assessment"],
+        })
+
     overall_gpa = (total_grade_points / total_courses_with_grades) if total_courses_with_grades > 0 else 0.0
-    
-    # Get recent results (last 10)
-    recent_results = sorted(all_results, key=lambda r: r.issued_date, reverse=True)[:10]
     recent_results_data = [
         {
             "id": r.id,
@@ -1151,53 +1274,64 @@ async def get_performance_dashboard(
         for r in recent_results
     ]
     
-    # Get attendance summary
     attendance_summary = {}
-    for enrollment in enrollments:
-        stats = await attendance_repo.get_attendance_stats(student.id, enrollment.course_id)
-        course = await course_repo.get_by_id(enrollment.course_id)
+    for enrollment in page_enrollments:
+        course = courses.get(enrollment.course_id)
+        stats = attendance_by_course.get(enrollment.course_id) or {
+            "present": 0, "absent": 0, "late": 0, "excused": 0, "total": 0,
+        }
         if course:
+            attended = stats.get("total", 0)
+            present = stats.get("present", 0)
+            percentage = round((present / attended * 100) if attended else 0.0, 2)
             attendance_summary[enrollment.course_id] = {
                 "course_title": course.title,
-                "present": stats.get("present", 0),
+                "present": present,
                 "absent": stats.get("absent", 0),
                 "late": stats.get("late", 0),
                 "excused": stats.get("excused", 0),
-                "total": stats.get("total", 0),
-                "percentage": stats.get("percentage", 0.0),
+                "total": attended,
+                "percentage": percentage,
             }
     
     return {
         "overall_gpa": round(overall_gpa, 2),
-        "total_courses": len(enrollments),
-        "completed_courses": len([e for e in enrollments if e.status == "completed"]),
-        "active_courses": len([e for e in enrollments if e.status == "active"]),
+        "total_courses": verified_total,
+        "completed_courses": status_counts.get("completed", 0),
+        "active_courses": status_counts.get("active", 0),
         "course_performance": course_performance,
         "grade_distribution": grade_distribution,
         "recent_results": recent_results_data,
         "attendance_summary": attendance_summary,
+        "skip": page_start,
+        "limit": page_size,
     }
 
 
 # ==================== Calendar Events ====================
 
-@router.get("/calendar/events", response_model=list[CalendarEventPublic])
+@router.get("/calendar/events", response_model=PaginatedResponse[CalendarEventPublic])
 async def get_my_calendar_events(
     start_date: str | None = Query(default=None, description="Start date (ISO format)"),
     end_date: str | None = Query(default=None, description="End date (ISO format)"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     calendar_service: CalendarEventService = Depends(get_calendar_event_service),
-) -> list[CalendarEventPublic]:
-    """Get calendar events for current user's enrolled courses. Requires admin-verified enrollment."""
-    student, enrollments = verified_data
-    course_ids = [e.course_id for e in enrollments]
-    
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[CalendarEventPublic]:
+    """Page calendar events for verified enrollments. Archived parent courses are omitted."""
+    student, provided = verified_data
+    if isinstance(provided, list):
+        course_ids = [enrollment.course_id for enrollment in provided]
+    else:
+        course_ids = await enrollment_repo.verified_course_ids(student.id)
     start = datetime.fromisoformat(start_date.replace('Z', '+00:00')) if start_date else None
     end = datetime.fromisoformat(end_date.replace('Z', '+00:00')) if end_date else None
-    
-    events = await calendar_service.get_student_events(course_ids, start, end)
-    
-    return [
+    events, total = await calendar_service.page_student_events(
+        course_ids, start, end, skip=skip, limit=limit
+    )
+    return _page([
         CalendarEventPublic(
             id=e.id,
             course_id=e.course_id,
@@ -1216,21 +1350,22 @@ async def get_my_calendar_events(
             updated_at=e.updated_at,
         )
         for e in events
-    ]
+    ], total, skip, limit)
 
 
 # ==================== Payments ====================
 
-@router.get("/payments", response_model=list[PaymentPublic])
+@router.get("/payments", response_model=PaginatedResponse[PaymentPublic])
 async def get_my_payments(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     payment_service: PaymentService = Depends(get_payment_service),
-) -> list[PaymentPublic]:
-    """Get all payments for current user. Requires admin-verified enrollment."""
+) -> PaginatedResponse[PaymentPublic]:
+    """Page payments for the current student."""
     student, _ = verified_data
-    
-    payments = await payment_service.get_student_payments(student.id)
-    return [
+    payments, total = await payment_service.list_payments(skip, limit, student_id=student.id)
+    return _page([
         PaymentPublic(
             id=p.id,
             student_id=p.student_id,
@@ -1252,55 +1387,64 @@ async def get_my_payments(
             updated_at=p.updated_at,
         )
         for p in payments
-    ]
+    ], total, skip, limit)
 
 
 # ==================== Forum ====================
 
-@router.get("/courses/{course_id}/forum", response_model=list[ForumPostPublic])
+def _forum_public(post, author_name: str | None, reply_count: int) -> ForumPostPublic:
+    return ForumPostPublic(
+        id=post.id,
+        course_id=post.course_id,
+        parent_post_id=post.parent_post_id,
+        author_id=post.author_id,
+        author_name=author_name,
+        title=post.title,
+        content=post.content,
+        post_type=post.post_type,
+        is_resolved=post.is_resolved,
+        is_pinned=post.is_pinned,
+        upvotes=post.upvotes,
+        downvotes=post.downvotes,
+        views=post.views,
+        reply_count=reply_count,
+        created_at=post.created_at,
+        updated_at=post.updated_at,
+    )
+
+
+@router.get("/courses/{course_id}/forum", response_model=PaginatedResponse[ForumPostPublic])
 async def get_forum_posts(
     course_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     forum_service: ForumService = Depends(get_forum_service),
     user_repo: UserRepository = Depends(get_user_repository),
-) -> list[ForumPostPublic]:
-    """Get forum posts for a course. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    if not any(e.course_id == course_id for e in verified_enrollments):
-        return []
-    posts = await forum_service.get_course_posts(course_id, top_level_only=True)
-    
-    result = []
-    for post in posts:
-        # Get author name
-        author = await user_repo.get_by_id(post.author_id)
-        author_name = author.full_name if author else None
-        
-        # Get reply count
-        replies = await forum_service.get_replies(post.id)
-        
-        result.append(
-            ForumPostPublic(
-                id=post.id,
-                course_id=post.course_id,
-                parent_post_id=post.parent_post_id,
-                author_id=post.author_id,
-                author_name=author_name,
-                title=post.title,
-                content=post.content,
-                post_type=post.post_type,
-                is_resolved=post.is_resolved,
-                is_pinned=post.is_pinned,
-                upvotes=post.upvotes,
-                downvotes=post.downvotes,
-                views=post.views,
-                reply_count=len(replies),
-                created_at=post.created_at,
-                updated_at=post.updated_at,
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[ForumPostPublic]:
+    """Page forum posts. Authors and reply counts are loaded in batches."""
+    student, provided = verified_data
+    if await _course_access(student.id, course_id, provided, enrollment_repo) is None:
+        return _page([], 0, skip, limit)
+    posts, total = await forum_service.page_course_posts(
+        course_id, skip=skip, limit=limit, top_level_only=True
+    )
+    authors = await user_repo.load_by_ids([post.author_id for post in posts])
+    counts = await forum_service.reply_counts([post.id for post in posts])
+    return _page(
+        [
+            _forum_public(
+                post,
+                authors[post.author_id].full_name if post.author_id in authors else None,
+                counts.get(post.id, 0),
             )
-        )
-    
-    return result
+            for post in posts
+        ],
+        total,
+        skip,
+        limit,
+    )
 
 
 @router.get("/forum/posts/{post_id}", response_model=ForumPostPublic)
@@ -1309,76 +1453,49 @@ async def get_forum_post(
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     forum_service: ForumService = Depends(get_forum_service),
     user_repo: UserRepository = Depends(get_user_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> ForumPostPublic:
     """Get a forum post with replies. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    post = await forum_service.get_post(post_id)
-    if not any(e.course_id == post.course_id for e in verified_enrollments):
+    student, provided = verified_data
+    post = await forum_service.get_post(post_id, operational=True)
+    if await _course_access(student.id, post.course_id, provided, enrollment_repo) is None:
         raise NotFoundError("Forum post not found")
     author = await user_repo.get_by_id(post.author_id)
-    replies = await forum_service.get_replies(post.id)
-    
-    return ForumPostPublic(
-        id=post.id,
-        course_id=post.course_id,
-        parent_post_id=post.parent_post_id,
-        author_id=post.author_id,
-        author_name=author.full_name if author else None,
-        title=post.title,
-        content=post.content,
-        post_type=post.post_type,
-        is_resolved=post.is_resolved,
-        is_pinned=post.is_pinned,
-        upvotes=post.upvotes,
-        downvotes=post.downvotes,
-        views=post.views,
-        reply_count=len(replies),
-        created_at=post.created_at,
-        updated_at=post.updated_at,
-    )
+    counts = await forum_service.reply_counts([post.id])
+    return _forum_public(post, author.full_name if author else None, counts.get(post.id, 0))
 
 
-@router.get("/forum/posts/{post_id}/replies", response_model=list[ForumPostPublic])
+@router.get("/forum/posts/{post_id}/replies", response_model=PaginatedResponse[ForumPostPublic])
 async def get_forum_replies(
     post_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     forum_service: ForumService = Depends(get_forum_service),
     user_repo: UserRepository = Depends(get_user_repository),
-) -> list[ForumPostPublic]:
-    """Get replies to a forum post. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    parent_post = await forum_service.get_post(post_id)
-    if not any(e.course_id == parent_post.course_id for e in verified_enrollments):
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+) -> PaginatedResponse[ForumPostPublic]:
+    """Page replies. Authors and nested reply counts are loaded in batches."""
+    student, provided = verified_data
+    parent_post = await forum_service.get_post(post_id, operational=True)
+    if await _course_access(student.id, parent_post.course_id, provided, enrollment_repo) is None:
         raise NotFoundError("Forum post not found")
-    replies = await forum_service.get_replies(post_id)
-    
-    result = []
-    for reply in replies:
-        author = await user_repo.get_by_id(reply.author_id)
-        reply_replies = await forum_service.get_replies(reply.id)
-        
-        result.append(
-            ForumPostPublic(
-                id=reply.id,
-                course_id=reply.course_id,
-                parent_post_id=reply.parent_post_id,
-                author_id=reply.author_id,
-                author_name=author.full_name if author else None,
-                title=reply.title,
-                content=reply.content,
-                post_type=reply.post_type,
-                is_resolved=reply.is_resolved,
-                is_pinned=reply.is_pinned,
-                upvotes=reply.upvotes,
-                downvotes=reply.downvotes,
-                views=reply.views,
-                reply_count=len(reply_replies),
-                created_at=reply.created_at,
-                updated_at=reply.updated_at,
+    replies, total = await forum_service.page_replies(post_id, skip=skip, limit=limit)
+    authors = await user_repo.load_by_ids([reply.author_id for reply in replies])
+    counts = await forum_service.reply_counts([reply.id for reply in replies])
+    return _page(
+        [
+            _forum_public(
+                reply,
+                authors[reply.author_id].full_name if reply.author_id in authors else None,
+                counts.get(reply.id, 0),
             )
-        )
-    
-    return result
+            for reply in replies
+        ],
+        total,
+        skip,
+        limit,
+    )
 
 
 @router.post("/forum/posts", response_model=ForumPostPublic, status_code=status.HTTP_201_CREATED)
@@ -1387,33 +1504,16 @@ async def create_forum_post(
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     forum_service: ForumService = Depends(get_forum_service),
     user_repo: UserRepository = Depends(get_user_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> ForumPostPublic:
     """Create a new forum post. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    if not any(e.course_id == payload.course_id for e in verified_enrollments):
+    student, provided = verified_data
+    if await _course_access(student.id, payload.course_id, provided, enrollment_repo) is None:
         raise ForbiddenError("Not enrolled in this course")
     post = await forum_service.create_post(payload, student.user_id)
     author = await user_repo.get_by_id(post.author_id)
-    replies = await forum_service.get_replies(post.id)
-    
-    return ForumPostPublic(
-        id=post.id,
-        course_id=post.course_id,
-        parent_post_id=post.parent_post_id,
-        author_id=post.author_id,
-        author_name=author.full_name if author else None,
-        title=post.title,
-        content=post.content,
-        post_type=post.post_type,
-        is_resolved=post.is_resolved,
-        is_pinned=post.is_pinned,
-        upvotes=post.upvotes,
-        downvotes=post.downvotes,
-        views=post.views,
-        reply_count=len(replies),
-        created_at=post.created_at,
-        updated_at=post.updated_at,
-    )
+    counts = await forum_service.reply_counts([post.id])
+    return _forum_public(post, author.full_name if author else None, counts.get(post.id, 0))
 
 
 @router.post("/forum/posts/{post_id}/vote", response_model=ForumPostPublic)
@@ -1423,31 +1523,14 @@ async def vote_forum_post(
     verified_data: tuple = Depends(get_require_verified_enrollment()),
     forum_service: ForumService = Depends(get_forum_service),
     user_repo: UserRepository = Depends(get_user_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> ForumPostPublic:
     """Vote on a forum post. Requires admin-verified enrollment for this course."""
-    student, verified_enrollments = verified_data
-    existing_post = await forum_service.get_post(post_id)
-    if not any(e.course_id == existing_post.course_id for e in verified_enrollments):
+    student, provided = verified_data
+    existing_post = await forum_service.get_post(post_id, operational=True)
+    if await _course_access(student.id, existing_post.course_id, provided, enrollment_repo) is None:
         raise NotFoundError("Forum post not found")
     post = await forum_service.vote_post(post_id, payload)
     author = await user_repo.get_by_id(post.author_id)
-    replies = await forum_service.get_replies(post.id)
-    
-    return ForumPostPublic(
-        id=post.id,
-        course_id=post.course_id,
-        parent_post_id=post.parent_post_id,
-        author_id=post.author_id,
-        author_name=author.full_name if author else None,
-        title=post.title,
-        content=post.content,
-        post_type=post.post_type,
-        is_resolved=post.is_resolved,
-        is_pinned=post.is_pinned,
-        upvotes=post.upvotes,
-        downvotes=post.downvotes,
-        views=post.views,
-        reply_count=len(replies),
-        created_at=post.created_at,
-        updated_at=post.updated_at,
-    )
+    counts = await forum_service.reply_counts([post.id])
+    return _forum_public(post, author.full_name if author else None, counts.get(post.id, 0))

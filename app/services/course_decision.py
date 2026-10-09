@@ -6,7 +6,6 @@ Lesson files and assignment instructions stay behind enrollment.
 from __future__ import annotations
 
 from app.repositories.archival import record_is_active
-from app.repositories.listing import MAX_PAGE_SIZE
 from app.schemas.course import (
     CourseDecisionPublic,
     CourseInstructorSummary,
@@ -36,18 +35,12 @@ async def build_course_decision(
         raise NotFoundError("Course not found")
 
     instructor = await _instructor_summary(course.instructor_id, instructors, users)
-    lessons, lesson_total = await materials.list_page(
-        course.id,
-        skip=0,
-        limit=MAX_PAGE_SIZE,
-        published_only=True,
-    )
-    practical, practical_total = await assignments.list_page(
-        course.id,
-        skip=0,
-        limit=MAX_PAGE_SIZE,
-        published_only=True,
-    )
+    # The public course page returns every published lesson and practical title.
+    # Those lists are the response, so this read stays complete and is paged internally.
+    lessons = await materials.get_by_course(course.id, published_only=True)
+    practical = await assignments.get_by_course(course.id, published_only=True)
+    lesson_total = len(lessons)
+    practical_total = len(practical)
     return CourseDecisionPublic(
         instructor=instructor,
         lessons=[

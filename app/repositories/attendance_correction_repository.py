@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 
 from app.core.attendance_correction import OPEN_STATES
+from app.db.index_status import ensure_required_index
 from app.models.attendance_correction import AttendanceCorrection
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
@@ -25,7 +26,8 @@ class AttendanceCorrectionRepository(BaseRepository[AttendanceCorrection]):
     collection_name = "attendance_corrections"
 
     async def ensure_indexes(self) -> None:
-        await self.collection.create_index(
+        await ensure_required_index(
+            self.collection,
             [("attendance_id", ASCENDING)],
             unique=True,
             partialFilterExpression={"status": {"$in": list(OPEN_STATES)}},
@@ -72,6 +74,16 @@ class AttendanceCorrectionRepository(BaseRepository[AttendanceCorrection]):
             return None
         doc = await self.collection.find_one({"_id": oid})
         return self._to_model(doc) if doc else None
+
+    async def delete(self, doc_id: str) -> bool:
+        """Resolved requests stay as the audit of a mark change. They are not archived."""
+        del doc_id
+        return False
+
+    async def purge_document(self, doc_id: str) -> bool:
+        """Correction history is not disposable and has no purge workflow."""
+        del doc_id
+        return False
 
     async def find_open_for_attendance(self, attendance_id: str) -> AttendanceCorrection | None:
         doc = await self.collection.find_one(

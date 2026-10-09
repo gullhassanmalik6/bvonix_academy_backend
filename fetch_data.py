@@ -40,16 +40,34 @@ def format_document(doc: dict[str, Any], hide_sensitive: bool = True) -> dict[st
     return formatted
 
 
-async def fetch_collection_data(collection_name: str) -> list[dict[str, Any]]:
-    """Fetch all documents from a collection."""
-    try:
-        collection = mongodb.db[collection_name]
-        cursor = collection.find()
-        documents = await cursor.to_list(length=None)
-        return documents
-    except Exception as e:
-        print(f"  [ERROR] Error fetching {collection_name}: {e}")
-        return []
+async def stream_collection(collection_name: str, batch_size: int = 100):
+    """Yield every document in bounded batches and return the printed count."""
+    collection = mongodb.db[collection_name]
+    expected = await collection.count_documents({})
+    printed = 0
+    skip = 0
+    while skip < expected:
+        batch = await (
+            collection.find({})
+            .sort([("_id", 1)])
+            .skip(skip)
+            .limit(batch_size)
+            .to_list(length=batch_size)
+        )
+        if not batch:
+            break
+        for document in batch:
+            printed += 1
+            formatted = format_document(document)
+            print(f"  Document {printed}:")
+            print(f"  {json.dumps(formatted, indent=4, default=str)}")
+            print()
+        skip += len(batch)
+    if printed != expected:
+        raise RuntimeError(
+            f"{collection_name} exported {printed} document(s) but the collection count is {expected}"
+        )
+    return printed
 
 
 async def main():
@@ -60,7 +78,6 @@ async def main():
     print("FETCHING DATA FROM MONGODB DATABASE")
     print("=" * 80)
     print(f"Database: {settings.mongodb_db}")
-    print(f"URI: {settings.mongodb_uri}")
     print("=" * 80)
     print()
     
@@ -70,7 +87,7 @@ async def main():
         print("[OK] Connected to MongoDB\n")
     except Exception as e:
         print(f"[ERROR] Failed to connect to MongoDB: {e}")
-        return
+        raise SystemExit(1) from e
     
     # List of collections to fetch
     collections = [
@@ -85,46 +102,39 @@ async def main():
     ]
     
     total_documents = 0
-    
-    # Fetch data from each collection
-    for collection_name in collections:
-        print(f"[COLLECTION] {collection_name}")
-        print("-" * 80)
-        
-        documents = await fetch_collection_data(collection_name)
-        count = len(documents)
-        total_documents += count
-        
-        if count == 0:
-            print(f"  [WARNING] No documents found in '{collection_name}'")
-        else:
-            print(f"  [OK] Found {count} document(s)\n")
-            
-            for idx, doc in enumerate(documents, 1):
-                formatted_doc = format_document(doc)
-                print(f"  Document {idx}:")
-                print(f"  {json.dumps(formatted_doc, indent=4, default=str)}")
-                print()
-        
-        print()
-    
-    # Summary
-    print("=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-    print(f"Total documents across all collections: {total_documents}")
-    print("=" * 80)
-    
-    # List all collections in database
-    print("\n[INFO] All collections in database:")
-    all_collections = await mongodb.db.list_collection_names()
-    for coll in sorted(all_collections):
-        count = await mongodb.db[coll].count_documents({})
-        print(f"  - {coll}: {count} document(s)")
-    
-    # Disconnect
-    await mongodb.disconnect()
-    print("\n[OK] Disconnected from MongoDB")
+
+    try:
+        for collection_name in collections:
+            print(f"[COLLECTION] {collection_name}")
+            print("-" * 80)
+
+            count = await stream_collection(collection_name)
+            total_documents += count
+
+            if count == 0:
+                print(f"  [WARNING] No documents found in '{collection_name}'")
+            else:
+                print(f"  [OK] Found {count} document(s)\n")
+
+            print()
+
+        print("=" * 80)
+        print("SUMMARY")
+        print("=" * 80)
+        print(f"Total documents across all collections: {total_documents}")
+        print("=" * 80)
+
+        print("\n[INFO] All collections in database:")
+        all_collections = await mongodb.db.list_collection_names()
+        for coll in sorted(all_collections):
+            count = await mongodb.db[coll].count_documents({})
+            print(f"  - {coll}: {count} document(s)")
+    except Exception as e:
+        print(f"\n[ERROR] Export failed: {e}")
+        raise SystemExit(1) from e
+    finally:
+        await mongodb.disconnect()
+        print("\n[OK] Disconnected from MongoDB")
 
 
 if __name__ == "__main__":

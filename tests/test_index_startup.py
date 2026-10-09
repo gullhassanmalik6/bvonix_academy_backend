@@ -7,6 +7,7 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
+from app.db.index_status import required_indexes_ready, reset_required_index_status
 from app.db.mongodb import mongodb
 from app.main import lifespan
 
@@ -65,12 +66,15 @@ class IndexStartupTests(unittest.TestCase):
             self.assertTrue(started)
             message = "\n".join(captured.output)
             self.assertIn("index creation failed for 1 collection", message)
-            self.assertIn("index failed", message)
+            self.assertNotIn("index failed", message)
+            self.assertFalse(required_indexes_ready())
 
+        reset_required_index_status()
         try:
             asyncio.run(exercise())
         finally:
             mongodb._db = None
+            reset_required_index_status()
         disconnect.assert_awaited()
 
 

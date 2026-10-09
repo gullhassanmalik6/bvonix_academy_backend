@@ -85,8 +85,11 @@ def get_user_service(
     return UserService(users, audit=audit, sessions=sessions)
 
 
-def get_course_service(courses: CourseRepository = Depends(get_course_repository)) -> CourseService:
-    return CourseService(courses)
+def get_course_service(
+    courses: CourseRepository = Depends(get_course_repository),
+    audit: AuditService = Depends(get_audit_service),
+) -> CourseService:
+    return CourseService(courses, audit=audit)
 
 
 def get_instructor_service(
@@ -109,9 +112,10 @@ def get_enrollment_repository() -> EnrollmentRepository:
 
 def get_require_verified_enrollment():
     """
-    Returns a dependency that requires the current user to have at least one admin-verified enrollment.
+    Require one admin-verified active or completed enrollment.
     Use: verified_data: tuple = Depends(get_require_verified_enrollment())
-    Returns (student, verified_enrollments). Raises ForbiddenError if none.
+    Returns (student, None). Course checks use get_access_enrollment.
+    Raises ForbiddenError when no eligible enrollment exists.
     """
     from app.core.auth import get_current_user
     from app.utils.exceptions import ForbiddenError
@@ -126,12 +130,12 @@ def get_require_verified_enrollment():
             raise ForbiddenError(
                 "LMS access requires enrollment in a course. Please enroll in a course and wait for admin payment verification."
             )
-        verified = await enrollment_repo.get_verified_by_student(student.id)
-        if not verified:
+        # Existence only. Course and enrollment checks use find_one in the route.
+        if not await enrollment_repo.has_verified_enrollment(student.id):
             raise ForbiddenError(
                 "LMS access requires admin-verified payment. Please complete your enrollment, upload your payment receipt, and wait for admin verification."
             )
-        return (student, verified)
+        return (student, None)
 
     return _require_verified_enrollment
 
@@ -190,9 +194,10 @@ def get_attendance_correction_repository() -> AttendanceCorrectionRepository:
 def get_attendance_correction_service(
     corrections: AttendanceCorrectionRepository = Depends(get_attendance_correction_repository),
     attendance: AttendanceService = Depends(get_attendance_service),
+    courses: CourseRepository = Depends(get_course_repository),
     audit: AuditService = Depends(get_audit_service),
 ) -> AttendanceCorrectionService:
-    return AttendanceCorrectionService(corrections, attendance, audit=audit)
+    return AttendanceCorrectionService(corrections, attendance, courses=courses, audit=audit)
 
 
 def get_course_material_repository() -> CourseMaterialRepository:
@@ -225,28 +230,35 @@ def get_forum_repository() -> ForumPostRepository:
 
 def get_course_material_service(
     materials: CourseMaterialRepository = Depends(get_course_material_repository),
+    courses: CourseRepository = Depends(get_course_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> CourseMaterialService:
-    return CourseMaterialService(materials)
+    return CourseMaterialService(materials, courses=courses, audit=audit)
 
 
 def get_assignment_service(
     assignments: AssignmentRepository = Depends(get_assignment_repository),
     submissions: AssignmentSubmissionRepository = Depends(get_assignment_submission_repository),
+    courses: CourseRepository = Depends(get_course_repository),
     audit: AuditService = Depends(get_audit_service),
 ) -> AssignmentService:
-    return AssignmentService(assignments, submissions, audit=audit)
+    return AssignmentService(assignments, submissions, courses=courses, audit=audit)
 
 
 def get_live_session_service(
     sessions: LiveSessionRepository = Depends(get_live_session_repository),
+    courses: CourseRepository = Depends(get_course_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> LiveSessionService:
-    return LiveSessionService(sessions)
+    return LiveSessionService(sessions, courses=courses, audit=audit)
 
 
 def get_announcement_service(
     announcements: AnnouncementRepository = Depends(get_announcement_repository),
+    courses: CourseRepository = Depends(get_course_repository),
+    audit: AuditService = Depends(get_audit_service),
 ) -> AnnouncementService:
-    return AnnouncementService(announcements)
+    return AnnouncementService(announcements, courses=courses, audit=audit)
 
 
 def get_payment_service(
@@ -259,8 +271,9 @@ def get_payment_service(
 def get_forum_service(
     posts: ForumPostRepository = Depends(get_forum_repository),
     users: UserRepository = Depends(get_user_repository),
+    courses: CourseRepository = Depends(get_course_repository),
 ) -> ForumService:
-    return ForumService(posts, users)
+    return ForumService(posts, users, courses=courses)
 
 
 def get_calendar_event_repository() -> CalendarEventRepository:
@@ -269,6 +282,7 @@ def get_calendar_event_repository() -> CalendarEventRepository:
 
 def get_calendar_event_service(
     events: CalendarEventRepository = Depends(get_calendar_event_repository),
+    courses: CourseRepository = Depends(get_course_repository),
 ) -> CalendarEventService:
-    return CalendarEventService(events)
+    return CalendarEventService(events, courses=courses)
 

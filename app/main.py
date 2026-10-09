@@ -9,6 +9,8 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.core.health import ensure_startup_database
+from app.core.security_config import ensure_production_origins, ensure_production_secret
+from app.db.index_status import note_required_index_failure, reset_required_index_status
 from app.db.mongodb import mongodb
 from app.middleware.cors import setup_cors
 from app.middleware.exception_handler import (
@@ -50,11 +52,24 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
     
     settings = get_settings()
+    try:
+        ensure_production_secret(
+            app_env=settings.app_env,
+            jwt_secret=settings.jwt_secret,
+            jwt_algorithm=settings.jwt_algorithm,
+        )
+        ensure_production_origins(
+            app_env=settings.app_env,
+            allowed_origins=settings.allowed_origins,
+        )
+    except RuntimeError:
+        logger.error("Production startup failed because security configuration is not usable.")
+        raise
     available = False
     try:
         available = await mongodb.connect()
-    except Exception as exc:
-        logger.error("MongoDB client could not be created: %s", exc)
+    except Exception:
+        logger.error("MongoDB client could not be created.")
     try:
         ensure_startup_database(settings.app_env, available)
     except RuntimeError:
@@ -63,36 +78,42 @@ async def lifespan(app: FastAPI):
     if available:
         logger.info("MongoDB connection established")
         import asyncio
+        reset_required_index_status()
+        index_tasks = (
+            (UserRepository, True),
+            (CourseRepository, False),
+            (InstructorRepository, True),
+            (StudentRepository, True),
+            (EnrollmentRepository, True),
+            (ResultRepository, False),
+            (AttendanceRepository, True),
+            (AttendanceCorrectionRepository, True),
+            (CertificateRepository, True),
+            (ScholarshipRepository, False),
+            (CourseMaterialRepository, False),
+            (AssignmentRepository, False),
+            (AssignmentSubmissionRepository, True),
+            (LiveSessionRepository, False),
+            (AnnouncementRepository, False),
+            (PaymentRepository, False),
+            (ForumPostRepository, False),
+            (NotificationRepository, False),
+            (CalendarEventRepository, False),
+            (AuditLogRepository, True),
+            (SessionRepository, True),
+        )
         results = await asyncio.gather(
-            UserRepository(mongodb.db).ensure_indexes(),
-            CourseRepository(mongodb.db).ensure_indexes(),
-            InstructorRepository(mongodb.db).ensure_indexes(),
-            StudentRepository(mongodb.db).ensure_indexes(),
-            EnrollmentRepository(mongodb.db).ensure_indexes(),
-            ResultRepository(mongodb.db).ensure_indexes(),
-            AttendanceRepository(mongodb.db).ensure_indexes(),
-            AttendanceCorrectionRepository(mongodb.db).ensure_indexes(),
-            CertificateRepository(mongodb.db).ensure_indexes(),
-            ScholarshipRepository(mongodb.db).ensure_indexes(),
-            CourseMaterialRepository(mongodb.db).ensure_indexes(),
-            AssignmentRepository(mongodb.db).ensure_indexes(),
-            AssignmentSubmissionRepository(mongodb.db).ensure_indexes(),
-            LiveSessionRepository(mongodb.db).ensure_indexes(),
-            AnnouncementRepository(mongodb.db).ensure_indexes(),
-            PaymentRepository(mongodb.db).ensure_indexes(),
-            ForumPostRepository(mongodb.db).ensure_indexes(),
-            NotificationRepository(mongodb.db).ensure_indexes(),
-            CalendarEventRepository(mongodb.db).ensure_indexes(),
-            AuditLogRepository(mongodb.db).ensure_indexes(),
-            SessionRepository(mongodb.db).ensure_indexes(),
+            *(repository(mongodb.db).ensure_indexes() for repository, _required in index_tasks),
             return_exceptions=True,
         )
+        for (_repository, required), result in zip(index_tasks, results):
+            if required and isinstance(result, Exception):
+                note_required_index_failure()
         failures = [result for result in results if isinstance(result, Exception)]
         if failures:
             logger.error(
-                "MongoDB index creation failed for %s collection(s). First error: %s",
+                "MongoDB index creation failed for %s collection(s).",
                 len(failures),
-                failures[0],
             )
         else:
             logger.info("MongoDB indexes created successfully")
@@ -137,14 +158,37 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(api_router, prefix=settings.api_prefix)
     
-    # Mount static files for uploads
-    try:
-        from pathlib import Path
-        uploads_dir = Path("uploads")
-        uploads_dir.mkdir(exist_ok=True)
-        app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-    except Exception:
-        pass  # Ignore if directory doesn't exist yet
+    # Public site assets only. Receipts, profile images, and enrollment
+    # cards are served by the authorized download route.
+    from pathlib import Path
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    uploads_dir = Path("uploads")
+    uploads_dir.mkdir(exist_ok=True)
+    for public_name in (
+        "logos",
+        "hero_icons",
+        "community_images",
+        "benefit_icons",
+        "subject_icons",
+        "testimonial_avatars",
+    ):
+        public_dir = uploads_dir / public_name
+        public_dir.mkdir(exist_ok=True)
+        app.mount(
+            f"/uploads/{public_name}",
+            StaticFiles(directory=str(public_dir)),
+            name=f"uploads_{public_name}",
+        )
+
+    academy_logo = uploads_dir / "academy_logo.png"
+
+    @app.get("/uploads/academy_logo.png", include_in_schema=False)
+    async def public_academy_logo() -> FileResponse:
+        if not academy_logo.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        return FileResponse(academy_logo)
     
     # Root endpoint
     @app.get("/", tags=["Root"])

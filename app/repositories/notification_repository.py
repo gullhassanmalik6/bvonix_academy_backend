@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 
 from app.models.notification import Notification
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -77,20 +78,24 @@ class NotificationRepository(BaseRepository[Notification]):
         user_id: str,
         unread_only: bool = False,
         limit: int = 50,
+        skip: int = 0,
     ) -> list[Notification]:
-        """Get notifications for a user."""
+        """Return one bounded page of a user's notifications."""
         try:
             user_oid = ObjectId(user_id)
         except Exception:
             return []
-        
-        filter_dict: dict[str, Any] = {"user_id": user_oid}
+
+        query: dict[str, Any] = {"user_id": user_oid}
         if unread_only:
-            filter_dict["is_read"] = False
-        
-        cursor = self.collection.find(filter_dict).sort("created_at", DESCENDING).limit(limit)
-        docs = await cursor.to_list(length=limit)
-        return [self._to_model(doc) for doc in docs]
+            query["is_read"] = False
+        page, _total = await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=[("created_at", DESCENDING)],
+        )
+        return page
 
     async def mark_as_read(self, notification_id: str) -> Notification | None:
         """Mark a notification as read."""
@@ -140,5 +145,5 @@ class NotificationRepository(BaseRepository[Notification]):
         except Exception:
             return 0
         
-        count = await self.collection.count_documents({"user_id": user_oid, "is_read": False})
+        count = await self.collection.count_documents(with_active({"user_id": user_oid, "is_read": False}))
         return count

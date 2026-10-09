@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from bson import ObjectId
+from pymongo import DESCENDING
+
 from app.core.permissions import can_manage_scholarships
 from app.repositories.scholarship_repository import ScholarshipRepository
 from app.repositories.student_repository import StudentRepository
@@ -9,7 +12,7 @@ from app.repositories.course_repository import CourseRepository
 from app.services.notification_service import NotificationService
 from app.schemas.scholarship import ScholarshipCreate, ScholarshipUpdate
 from app.models.scholarship import Scholarship
-from app.services.archive_actions import archive_record, purge_record
+from app.services.archive_actions import archive_record, load_for_maintenance, purge_record
 from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import ForbiddenError, NotFoundError
 
@@ -89,6 +92,25 @@ class ScholarshipService:
     async def get_student_course_scholarships(self, student_id: str, course_id: str) -> list[Scholarship]:
         """Get scholarships for a student in a specific course."""
         return await self._scholarships.get_by_student_and_course(student_id, course_id)
+
+    async def page_student_course_scholarships(
+        self,
+        student_id: str,
+        course_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Scholarship], int]:
+        try:
+            query = {
+                "student_id": ObjectId(student_id),
+                "$or": [{"course_id": ObjectId(course_id)}, {"course_id": None}],
+            }
+        except Exception:
+            return [], 0
+        return await self._scholarships.find_page(
+            query, skip=skip, limit=limit, sort=[("created_at", DESCENDING)]
+        )
 
     async def update_scholarship(self, scholarship_id: str, payload: ScholarshipUpdate) -> Scholarship:
         """Update a scholarship."""
@@ -179,7 +201,7 @@ class ScholarshipService:
 
     async def purge_scholarship(self, scholarship_id: str, *, actor_role: str, actor_id: str) -> None:
         """Permanently remove a scholarship. Super admin only."""
-        scholarship = await self.get_scholarship(scholarship_id)
+        scholarship = await load_for_maintenance(self._scholarships, scholarship_id, not_found="Scholarship not found")
         await purge_record(
             self._scholarships,
             scholarship,

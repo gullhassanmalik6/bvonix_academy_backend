@@ -13,11 +13,12 @@ from app.services.audit_context import capture_audit_request
 
 from app.core.admin import get_admin_user, get_management_user
 from app.core.auth import get_current_user
-from app.core.dependencies import get_student_repository, get_student_service
+from app.core.dependencies import get_course_repository, get_enrollment_repository, get_student_service
 from app.core.permissions import is_management
 from app.utils.exceptions import ForbiddenError
 from app.models.user import User
-from app.repositories.student_repository import StudentRepository
+from app.repositories.course_repository import CourseRepository
+from app.repositories.enrollment_repository import EnrollmentRepository
 from app.schemas.common import PaginatedResponse
 from app.schemas.student import StudentCreate, StudentPublic, StudentUpdate
 from app.services.student_service import StudentService
@@ -124,10 +125,11 @@ async def update_student(
     student_id: str,
     payload: StudentUpdate,
     service: StudentService = Depends(get_student_service),
+    enrollments: EnrollmentRepository = Depends(get_enrollment_repository),
     current_user: User = Depends(get_management_user),
 ) -> StudentPublic:
-    """Update a student. Students cannot change another student's record."""
-    student = await service.update_student(student_id, payload)
+    """Update a student. A submitted course list is rebuilt from enrollments."""
+    student = await service.update_student(student_id, payload, enrollments=enrollments)
     return StudentPublic(
         id=student.id,
         user_id=student.user_id,
@@ -144,10 +146,17 @@ async def enroll_in_course(
     student_id: str,
     course_id: str,
     service: StudentService = Depends(get_student_service),
+    enrollments: EnrollmentRepository = Depends(get_enrollment_repository),
+    courses: CourseRepository = Depends(get_course_repository),
     current_user: User = Depends(get_management_user),
 ) -> StudentPublic:
-    """Enroll a student in a course. Students enroll through the LMS."""
-    student = await service.enroll_in_course(student_id, course_id)
+    """Repair the compatibility list. Course registration stays on the LMS enroll route."""
+    student = await service.enroll_in_course(
+        student_id,
+        course_id,
+        enrollments=enrollments,
+        courses=courses,
+    )
     return StudentPublic(
         id=student.id,
         user_id=student.user_id,
@@ -164,10 +173,15 @@ async def unenroll_from_course(
     student_id: str,
     course_id: str,
     service: StudentService = Depends(get_student_service),
+    enrollments: EnrollmentRepository = Depends(get_enrollment_repository),
     current_user: User = Depends(get_management_user),
 ) -> StudentPublic:
-    """Unenroll a student from a course."""
-    student = await service.unenroll_from_course(student_id, course_id)
+    """Repair the compatibility list. Cancellation stays on the enrollment cancel route."""
+    student = await service.unenroll_from_course(
+        student_id,
+        course_id,
+        enrollments=enrollments,
+    )
     return StudentPublic(
         id=student.id,
         user_id=student.user_id,

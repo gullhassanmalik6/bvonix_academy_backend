@@ -14,7 +14,7 @@ from app.core.security import hash_password
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import AdminUserCreate, UserUpdate
-from app.services.archive_actions import archive_record, purge_record
+from app.services.archive_actions import archive_record, load_for_maintenance, purge_record
 from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import ConflictError, ForbiddenError, NotFoundError
 
@@ -144,7 +144,7 @@ class UserService:
     async def purge_user(self, user_id: str, *, actor_role: str, actor_id: str) -> None:
         """Permanently remove a user. Super admin only."""
         assert_can_purge(actor_role)
-        user = await self.get_user(user_id)
+        user = await load_for_maintenance(self._users, user_id, not_found="User not found")
         await self._revoke_sessions(user.id)
         await purge_record(
             self._users,

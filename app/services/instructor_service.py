@@ -13,7 +13,7 @@ from app.core.permissions import is_admin
 from app.models.instructor import Instructor
 from app.repositories.instructor_repository import InstructorRepository
 from app.schemas.instructor import InstructorCreate, InstructorUpdate
-from app.services.archive_actions import archive_record, purge_record
+from app.services.archive_actions import archive_record, load_for_maintenance, purge_record
 from app.services.audit_service import AuditService
 from app.utils.exceptions import ConflictError, ForbiddenError, NotFoundError
 
@@ -111,7 +111,7 @@ class InstructorService:
 
     async def purge_instructor(self, instructor_id: str, *, actor_role: str, actor_id: str) -> None:
         """Permanently remove an instructor profile. Super admin only."""
-        instructor = await self.get_instructor(instructor_id)
+        instructor = await load_for_maintenance(self._instructors, instructor_id, not_found="Instructor not found")
         await purge_record(
             self._instructors,
             instructor,

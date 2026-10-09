@@ -6,6 +6,7 @@ from typing import Any
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.user import User
 from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
@@ -25,7 +26,7 @@ class UserRepository(BaseRepository[User]):
 
     async def ensure_indexes(self) -> None:
         # Unique email for login/identity.
-        await self.collection.create_index([("email", ASCENDING)], unique=True)
+        await ensure_required_index(self.collection, [("email", ASCENDING)], unique=True)
         await self.collection.create_index([("full_name", ASCENDING)])
         await self.collection.create_index([("created_at", DESCENDING)])
 
@@ -65,11 +66,7 @@ class UserRepository(BaseRepository[User]):
         return self._to_model(doc) if doc else None
 
     async def get_by_id(self, user_id: str) -> User | None:
-        try:
-            oid = ObjectId(user_id)
-        except Exception:
-            return None
-        doc = await self.collection.find_one({"_id": oid})
+        doc = await self.find_document_by_id(user_id)
         return self._to_model(doc) if doc else None
 
     async def create_user(

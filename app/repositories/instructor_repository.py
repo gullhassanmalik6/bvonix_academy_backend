@@ -6,6 +6,7 @@ from typing import Any
 from bson import ObjectId
 from pymongo import ASCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.instructor import Instructor
 from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
@@ -17,7 +18,7 @@ class InstructorRepository(BaseRepository[Instructor]):
 
     async def ensure_indexes(self) -> None:
         # Unique user_id - one instructor per user
-        await self.collection.create_index([("user_id", ASCENDING)], unique=True)
+        await ensure_required_index(self.collection, [("user_id", ASCENDING)], unique=True)
         # Index on is_active for filtering
         await self.collection.create_index([("is_active", ASCENDING)])
 
@@ -36,11 +37,7 @@ class InstructorRepository(BaseRepository[Instructor]):
         )
 
     async def get_by_id(self, instructor_id: str) -> Instructor | None:
-        try:
-            oid = ObjectId(instructor_id)
-        except Exception:
-            return None
-        doc = await self.collection.find_one({"_id": oid})
+        doc = await self.find_document_by_id(instructor_id)
         return self._to_model(doc) if doc else None
 
     async def get_by_user_id(self, user_id: str) -> Instructor | None:

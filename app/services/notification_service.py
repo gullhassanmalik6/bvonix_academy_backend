@@ -99,9 +99,10 @@ class NotificationService:
         user_id: str,
         unread_only: bool = False,
         limit: int = 50,
+        skip: int = 0,
     ) -> list[Notification]:
-        """Get notifications for a user."""
-        return await self._notifications.get_by_user(user_id, unread_only, limit)
+        """Get one page of notifications for a user."""
+        return await self._notifications.get_by_user(user_id, unread_only, limit, skip)
 
     async def get_notification(self, notification_id: str) -> Notification:
         """Get a notification by ID."""

@@ -148,10 +148,11 @@ async def admin_list_courses(
 async def admin_create_course(
     payload: CourseCreate,
     service: CourseService = Depends(get_course_service),
+    instructors: InstructorRepository = Depends(get_instructor_repository),
     admin_user: User = Depends(get_management_user),
 ) -> CoursePublic:
     """Create a new course (admin only)."""
-    course = await service.create_course(payload)
+    course = await service.create_course(payload, instructors=instructors)
     return CoursePublic(
         id=course.id,
         title=course.title,
@@ -170,10 +171,16 @@ async def admin_update_course(
     course_id: str,
     payload: CourseUpdate,
     service: CourseService = Depends(get_course_service),
+    instructors: InstructorRepository = Depends(get_instructor_repository),
     admin_user: User = Depends(get_management_user),
 ) -> CoursePublic:
     """Update a course (admin only)."""
-    course = await service.update_course(course_id, payload)
+    course = await service.update_course(
+        course_id,
+        payload,
+        actor_role=admin_user.role,
+        instructors=instructors,
+    )
     return CoursePublic(
         id=course.id,
         title=course.title,
@@ -194,7 +201,11 @@ async def admin_delete_course(
     admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete a course (admin only)."""
-    await service.delete_course(course_id)
+    await service.delete_course(
+        course_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -438,10 +449,11 @@ async def admin_update_student(
     student_id: str,
     payload: StudentUpdate,
     service: StudentService = Depends(get_student_service),
+    enrollments: EnrollmentRepository = Depends(get_enrollment_repository),
     admin_user: User = Depends(get_management_user),
 ) -> StudentPublic:
-    """Update a student (admin only)."""
-    student = await service.update_student(student_id, payload)
+    """Update a student. A submitted course list is rebuilt from enrollments."""
+    student = await service.update_student(student_id, payload, enrollments=enrollments)
     return StudentPublic(
         id=student.id,
         user_id=student.user_id,
@@ -861,7 +873,11 @@ async def admin_delete_material(
     admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete a course material (admin only)."""
-    await service.delete_material(material_id)
+    await service.delete_material(
+        material_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -951,15 +967,24 @@ async def admin_update_assignment(
     )
 
 
-@router.get("/assignments/{assignment_id}/submissions", response_model=list[AssignmentSubmissionPublic])
+@router.get(
+    "/assignments/{assignment_id}/submissions",
+    response_model=PaginatedResponse[AssignmentSubmissionPublic],
+)
 async def admin_get_submissions(
     assignment_id: str,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
     service: AssignmentService = Depends(get_assignment_service),
     admin_user: User = Depends(get_management_user),
-) -> list[AssignmentSubmissionPublic]:
-    """Get all submissions for an assignment (admin only)."""
-    submissions = await service.get_assignment_submissions(assignment_id)
-    return [
+) -> PaginatedResponse[AssignmentSubmissionPublic]:
+    """Page submissions for an assignment (admin only)."""
+    del admin_user
+    submissions, total = await service.page_assignment_submissions(
+        assignment_id, skip=skip, limit=limit
+    )
+    return PaginatedResponse(
+        items=[
         AssignmentSubmissionPublic(
             id=s.id,
             assignment_id=s.assignment_id,
@@ -978,7 +1003,11 @@ async def admin_get_submissions(
             updated_at=s.updated_at,
         )
         for s in submissions
-    ]
+        ],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.post("/submissions/{submission_id}/grade", response_model=AssignmentSubmissionPublic)
@@ -1017,7 +1046,11 @@ async def admin_delete_assignment(
     admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete an assignment (admin only)."""
-    await service.delete_assignment(assignment_id)
+    await service.delete_assignment(
+        assignment_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1129,7 +1162,11 @@ async def admin_delete_session(
     admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete a live session (admin only)."""
-    await service.delete_session(session_id)
+    await service.delete_session(
+        session_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1223,7 +1260,11 @@ async def admin_delete_announcement(
     admin_user: User = Depends(get_management_user),
 ) -> Response:
     """Delete an announcement (admin only)."""
-    await service.delete_announcement(announcement_id)
+    await service.delete_announcement(
+        announcement_id,
+        archived_by=admin_user.id,
+        actor_role=admin_user.role,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1289,7 +1330,7 @@ async def admin_create_payment(
     admin_user: User = Depends(get_payment_admin),
 ) -> PaymentPublic:
     """Create a new payment record (admin only)."""
-    payment = await service.create_payment(payload, admin_user.id)
+    payment = await service.create_payment(payload, admin_user.id, actor_role=admin_user.role)
     return PaymentPublic(
         id=payment.id,
         student_id=payment.student_id,
@@ -1320,7 +1361,12 @@ async def admin_update_payment(
     admin_user: User = Depends(get_payment_admin),
 ) -> PaymentPublic:
     """Update a payment (admin only)."""
-    payment = await service.update_payment(payment_id, payload)
+    payment = await service.update_payment(
+        payment_id,
+        payload,
+        actor_role=admin_user.role,
+        actor_id=admin_user.id,
+    )
     return PaymentPublic(
         id=payment.id,
         student_id=payment.student_id,
@@ -1374,6 +1420,26 @@ async def admin_verify_enrollment(
             logger.error(f"[VERIFY] Enrollment {enrollment_id} not found")
             from app.utils.exceptions import NotFoundError
             raise NotFoundError("Enrollment not found")
+        from app.services.audit_service import commit_required_decision, recover_pending_decision
+
+        pending = enrollment.audit_pending if isinstance(enrollment.audit_pending, dict) else None
+        pending_action = pending.get("action") if pending else None
+
+        async def clear_pending():
+            return await enrollment_repo.update(enrollment.id, {"audit_pending": None})
+
+        if pending:
+            await recover_pending_decision(audit, enrollment, clear_pending)
+            enrollment = await enrollment_repo.get_by_id(enrollment_id)
+            if not enrollment:
+                from app.utils.exceptions import NotFoundError
+                raise NotFoundError("Enrollment not found")
+            if (
+                pending_action == "enrollment.verify"
+                and enrollment.verified_by_admin
+                and workflow_state(enrollment) == ACTIVE
+            ):
+                return enrollment_to_public(enrollment)
         previous_enrollment = snapshot(enrollment)
         logger.info(f"[VERIFY] Step 1: Success - Enrollment found: {enrollment.id}")
         
@@ -1383,7 +1449,7 @@ async def admin_verify_enrollment(
             logger.warning(f"[VERIFY] No payment receipt URL for enrollment {enrollment_id}")
             from app.utils.exceptions import AppError
             raise AppError("Cannot verify enrollment. Payment receipt must be uploaded by the student first.")
-        logger.info(f"[VERIFY] Step 2: Success - Payment receipt found: {enrollment.payment_receipt_url}")
+        logger.info("[VERIFY] Step 2: Success - Payment receipt is present")
         assert_enrollment_transition(
             admin_user.role,
             workflow_state(enrollment),
@@ -1425,7 +1491,7 @@ async def admin_verify_enrollment(
             logger.error(f"[VERIFY] User {student.user_id} not found")
             from app.utils.exceptions import NotFoundError
             raise NotFoundError("User not found")
-        logger.info(f"[VERIFY] Step 6: Success - User found: {student_user.email}")
+        logger.info("[VERIFY] Step 6: Success - User found")
         
         # Generate enrollment card PDF with student photo and details
         logger.info(f"[VERIFY] Step 7: Generating enrollment card")
@@ -1439,7 +1505,7 @@ async def admin_verify_enrollment(
                 student=student_user,
                 course=course,
             )
-            logger.info(f"[VERIFY] Step 7: Card generated at {card_path}")
+            logger.info("[VERIFY] Step 7: Card generated")
         except Exception as card_err:
             logger.error(f"[VERIFY] Step 7: Card generation failed (verification continues): {card_err}", exc_info=True)
             card_path = None
@@ -1462,9 +1528,19 @@ async def admin_verify_enrollment(
         if card_path:
             update_data["enrollment_card_url"] = card_path
         
-        logger.info(f"[VERIFY] Step 9: Updating enrollment in database")
-        logger.info(f"[VERIFY] Step 9: Update data keys: {list(update_data.keys())}")
-        updated = await enrollment_repo.update(enrollment_id, update_data)
+        logger.info("[VERIFY] Step 9: Updating enrollment in database")
+        logger.info("[VERIFY] Step 9: Update field count: %s", len(update_data))
+        updated = await commit_required_decision(
+            audit,
+            lambda data: enrollment_repo.update(enrollment_id, data),
+            action="enrollment.verify",
+            entity_type="enrollment",
+            entity_id=enrollment.id,
+            actor_id=admin_user.id,
+            actor_role=admin_user.role,
+            previous=previous_enrollment,
+            updates=update_data,
+        )
         if not updated:
             logger.error(f"[VERIFY] Step 9: Failed to update enrollment {enrollment_id}")
             from app.utils.exceptions import NotFoundError
@@ -1490,17 +1566,7 @@ async def admin_verify_enrollment(
         except Exception as notify_err:
             logger.warning(f"[VERIFY] Failed to send verification notification: {notify_err}")
 
-        await audit.record(
-            action="enrollment.verify",
-            entity_type="enrollment",
-            entity_id=enrollment.id,
-            previous=previous_enrollment,
-            current=snapshot(enrollment),
-            actor_id=admin_user.id,
-            actor_role=admin_user.role,
-        )
-
-        logger.info(f"[VERIFY] Step 11: Building response")
+        logger.info("[VERIFY] Step 11: Building response")
         try:
             response = EnrollmentPublic(
                 id=enrollment.id,
@@ -1568,7 +1634,7 @@ async def admin_generate_enrollment_card(
             raise AppError("Enrollment must be verified before generating card")
         
         # Get course and student user info
-        course = await course_repo.get_by_id(enrollment.course_id)
+        course = await course_repo.get_including_archived(enrollment.course_id)
         if not course:
             from app.utils.exceptions import NotFoundError
             raise NotFoundError("Course not found")
@@ -1663,7 +1729,7 @@ async def admin_get_enrollment_card_form(
     if not enrollment:
         raise NotFoundError("Enrollment not found")
 
-    course = await course_repo.get_by_id(enrollment.course_id)
+    course = await course_repo.get_including_archived(enrollment.course_id)
     student = await student_repo.get_by_id(enrollment.student_id)
     student_user = await user_repo.get_by_id(student.user_id) if student else None
 
@@ -1781,26 +1847,40 @@ async def admin_transition_enrollment(
     """Move an enrollment through review, approval, rejection, resubmission, or refund."""
     from app.utils.exceptions import NotFoundError
 
+    from app.services.audit_service import commit_required_decision, recover_pending_decision
+
     enrollment = await enrollment_repo.get_by_id(enrollment_id)
     if not enrollment:
         raise NotFoundError("Enrollment not found")
+    pending = enrollment.audit_pending if isinstance(enrollment.audit_pending, dict) else None
+    pending_action = pending.get("action") if pending else None
+
+    async def clear_pending():
+        return await enrollment_repo.update(enrollment.id, {"audit_pending": None})
+
+    if pending:
+        await recover_pending_decision(audit, enrollment, clear_pending)
+        enrollment = await enrollment_repo.get_by_id(enrollment_id) or enrollment
+        if (
+            pending_action == f"enrollment.{payload.workflow_state}"
+            and workflow_state(enrollment) == payload.workflow_state
+        ):
+            return enrollment_to_public(enrollment)
     current = workflow_state(enrollment)
     assert_enrollment_transition(admin_user.role, current, payload.workflow_state, owns_enrollment=False)
-    updated = await enrollment_repo.update(
-        enrollment_id,
-        enrollment_transition_updates(enrollment, payload.workflow_state, actor_id=admin_user.id),
+    updated = await commit_required_decision(
+        audit,
+        lambda data: enrollment_repo.update(enrollment_id, data),
+        action=f"enrollment.{payload.workflow_state}",
+        entity_type="enrollment",
+        entity_id=enrollment.id,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+        previous=enrollment,
+        updates=enrollment_transition_updates(enrollment, payload.workflow_state, actor_id=admin_user.id),
     )
     if not updated:
         raise NotFoundError("Enrollment not found")
-    await audit.record(
-        action=f"enrollment.{payload.workflow_state}",
-        entity_type="enrollment",
-        entity_id=updated.id,
-        previous=enrollment,
-        current=updated,
-        actor_id=admin_user.id,
-        actor_role=admin_user.role,
-    )
     return enrollment_to_public(updated)
 
 
@@ -1872,41 +1952,14 @@ async def admin_cancel_enrollment(
     student_repo: StudentRepository = Depends(get_student_repository),
     audit: AuditService = Depends(get_audit_service),
 ) -> EnrollmentPublic:
-    """Cancel a student enrollment (admin only). Sets status to cancelled and removes course from student's enrolled list."""
-    from datetime import datetime, timezone
+    """Cancel a student enrollment (admin only). Status is authoritative. The course list is derived afterward."""
+    from app.services.enrollment_registration import EnrollmentRegistration
 
-    from app.utils.exceptions import ConflictError, NotFoundError
-
-    enrollment = await enrollment_repo.get_by_id(enrollment_id)
-    if not enrollment:
-        raise NotFoundError("Enrollment not found")
-    if enrollment.status == "cancelled":
-        raise ConflictError("Enrollment is already cancelled")
-    assert_enrollment_transition(
-        admin_user.role,
-        workflow_state(enrollment),
-        "cancelled",
-        owns_enrollment=False,
-    )
-    previous_enrollment = snapshot(enrollment)
-
-    updated = await enrollment_repo.update(
-        enrollment_id,
-        enrollment_transition_updates(enrollment, "cancelled", actor_id=admin_user.id),
-    )
-    if not updated:
-        raise NotFoundError("Enrollment not found")
-
-    await student_repo.unenroll_from_course(enrollment.student_id, enrollment.course_id)
-    await audit.record(
-        action="enrollment.cancel",
-        entity_type="enrollment",
-        entity_id=updated.id,
-        previous=previous_enrollment,
-        current=snapshot(updated),
-        actor_id=admin_user.id,
-        actor_role=admin_user.role,
-    )
+    updated = await EnrollmentRegistration(
+        enrollment_repo,
+        student_repo,
+        audit=audit,
+    ).cancel(enrollment_id, actor_id=admin_user.id, actor_role=admin_user.role)
 
     return EnrollmentPublic(
         id=updated.id,

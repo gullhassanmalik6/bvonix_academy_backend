@@ -8,6 +8,7 @@ from typing import Any
 from bson import ObjectId
 from pymongo import ASCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.certificate import Certificate
 from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
@@ -26,9 +27,11 @@ class CertificateRepository(BaseRepository[Certificate]):
 
     async def ensure_indexes(self) -> None:
         # Unique certificate number
-        await self.collection.create_index([("certificate_number", ASCENDING)], unique=True)
+        await ensure_required_index(self.collection, [("certificate_number", ASCENDING)], unique=True)
         # Unique certificate per student-course
-        await self.collection.create_index([("student_id", ASCENDING), ("course_id", ASCENDING)], unique=True)
+        await ensure_required_index(
+            self.collection, [("student_id", ASCENDING), ("course_id", ASCENDING)], unique=True
+        )
         await self.collection.create_index([("enrollment_id", ASCENDING)])
         await self.collection.create_index([("is_verified", ASCENDING)])
 
@@ -60,9 +63,28 @@ class CertificateRepository(BaseRepository[Certificate]):
             student_oid = ObjectId(student_id)
         except Exception:
             return []
-        cursor = self.collection.find(with_active({"student_id": student_oid})).sort("issue_date", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"student_id": student_oid},
+            sort=[("issue_date", -1)],
+        )
+
+    async def page_for_student(
+        self,
+        student_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Certificate], int]:
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {"student_id": student_oid},
+            skip=skip,
+            limit=limit,
+            sort=[("issue_date", -1)],
+        )
 
     async def get_by_student_and_course(self, student_id: str, course_id: str) -> Certificate | None:
         """Get certificate for a student in a course."""
@@ -74,9 +96,21 @@ class CertificateRepository(BaseRepository[Certificate]):
         doc = await self.collection.find_one(with_active({"student_id": student_oid, "course_id": course_oid}))
         return self._to_model(doc) if doc else None
 
-    async def get_by_certificate_number(self, certificate_number: str) -> Certificate | None:
-        """Get certificate by certificate number."""
-        doc = await self.collection.find_one({"certificate_number": certificate_number})
+    async def get_by_id(self, certificate_id: str) -> Certificate | None:
+        doc = await self.find_document_by_id(certificate_id)
+        return self._to_model(doc) if doc else None
+
+    async def get_by_certificate_number(
+        self,
+        certificate_number: str,
+        *,
+        include_archived: bool = False,
+    ) -> Certificate | None:
+        """Operational lookup hides archived certificates. Uniqueness checks can include them."""
+        query: dict[str, Any] = {"certificate_number": certificate_number}
+        if not include_archived:
+            query = with_active(query)
+        doc = await self.collection.find_one(query)
         return self._to_model(doc) if doc else None
 
     async def create_certificate(
@@ -102,7 +136,7 @@ class CertificateRepository(BaseRepository[Certificate]):
         # Generate unique certificate number
         certificate_number = generate_certificate_number()
         # Ensure uniqueness
-        while await self.get_by_certificate_number(certificate_number):
+        while await self.get_by_certificate_number(certificate_number, include_archived=True):
             certificate_number = generate_certificate_number()
         
         payload = {

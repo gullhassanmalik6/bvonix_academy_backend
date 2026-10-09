@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 
 from app.models.announcement import Announcement
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -16,6 +17,7 @@ class AnnouncementRepository(BaseRepository[Announcement]):
 
     async def ensure_indexes(self) -> None:
         await self.collection.create_index([("course_id", ASCENDING)])
+        await self.collection.create_index([("course_id", ASCENDING), ("archived_at", ASCENDING)])
         await self.collection.create_index([("is_published", ASCENDING)])
         await self.collection.create_index([("published_at", ASCENDING)])
         await self.collection.create_index([("priority", ASCENDING)])
@@ -33,7 +35,13 @@ class AnnouncementRepository(BaseRepository[Announcement]):
             created_by=oid_str(doc["created_by"]),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
+
+    async def get_by_id(self, announcement_id: str) -> Announcement | None:
+        doc = await self.find_document_by_id(announcement_id)
+        return self._to_model(doc) if doc else None
 
     async def list_page(
         self,
@@ -64,7 +72,7 @@ class AnnouncementRepository(BaseRepository[Announcement]):
         published_only: bool = True,
     ) -> list[Announcement]:
         """Get announcements for a course or system-wide."""
-        filter_dict: dict[str, Any] = {}
+        filter_dict: dict[str, Any] = with_active()
         
         if course_id:
             try:
@@ -82,9 +90,33 @@ class AnnouncementRepository(BaseRepository[Announcement]):
                 {"expires_at": {"$gte": now}},
             ]
         
-        cursor = self.collection.find(filter_dict).sort("priority", -1).sort("published_at", -1)
-        docs = await cursor.to_list(length=100)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(filter_dict, sort=[("priority", -1), ("published_at", -1)])
+
+    async def page_published(
+        self,
+        course_id: str | None,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Announcement], int]:
+        """Page the same published, unexpired rows that get_by_course returns in full."""
+        query: dict[str, Any] = {}
+        if course_id:
+            try:
+                query["course_id"] = ObjectId(course_id)
+            except Exception:
+                return [], 0
+        else:
+            query["course_id"] = None
+        query["is_published"] = True
+        now = datetime.now(timezone.utc)
+        query["$or"] = [{"expires_at": None}, {"expires_at": {"$gte": now}}]
+        return await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=[("priority", -1), ("published_at", -1)],
+        )
 
     async def create_announcement(
         self,

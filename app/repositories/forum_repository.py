@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING
 
 from app.models.forum import ForumPost
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -36,7 +37,13 @@ class ForumPostRepository(BaseRepository[ForumPost]):
             views=doc.get("views", 0),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
+
+    async def get_by_id(self, post_id: str) -> ForumPost | None:
+        doc = await self.find_document_by_id(post_id)
+        return self._to_model(doc) if doc else None
 
     async def get_by_course(
         self,
@@ -49,13 +56,32 @@ class ForumPostRepository(BaseRepository[ForumPost]):
         except Exception:
             return []
         
-        filter_dict: dict[str, Any] = {"course_id": course_oid}
+        filter_dict: dict[str, Any] = with_active({"course_id": course_oid})
         if top_level_only:
             filter_dict["parent_post_id"] = None
         
-        cursor = self.collection.find(filter_dict).sort("is_pinned", -1).sort("created_at", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(filter_dict, sort=[("is_pinned", -1), ("created_at", -1)])
+
+    async def page_by_course(
+        self,
+        course_id: str,
+        *,
+        top_level_only: bool = True,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[ForumPost], int]:
+        try:
+            query: dict[str, Any] = {"course_id": ObjectId(course_id)}
+        except Exception:
+            return [], 0
+        if top_level_only:
+            query["parent_post_id"] = None
+        return await self.find_page(
+            query,
+            skip=skip,
+            limit=limit,
+            sort=[("is_pinned", -1), ("created_at", -1)],
+        )
 
     async def get_replies(self, post_id: str) -> list[ForumPost]:
         """Get replies to a post."""
@@ -64,9 +90,49 @@ class ForumPostRepository(BaseRepository[ForumPost]):
         except Exception:
             return []
         
-        cursor = self.collection.find({"parent_post_id": post_oid}).sort("created_at", ASCENDING)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"parent_post_id": post_oid},
+            sort=[("created_at", ASCENDING)],
+        )
+
+    async def page_replies(
+        self,
+        post_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[ForumPost], int]:
+        try:
+            post_oid = ObjectId(post_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {"parent_post_id": post_oid},
+            skip=skip,
+            limit=limit,
+            sort=[("created_at", ASCENDING)],
+        )
+
+    async def count_replies_for(self, post_ids: list[str]) -> dict[str, int]:
+        """Count direct replies for many posts in one aggregation."""
+        oids = []
+        for raw in post_ids:
+            try:
+                oids.append(ObjectId(raw))
+            except Exception:
+                continue
+        counts = {oid_str(oid): 0 for oid in oids}
+        if not oids:
+            return counts
+        pipeline = [
+            {"$match": with_active({"parent_post_id": {"$in": oids}})},
+            {"$group": {"_id": "$parent_post_id", "count": {"$sum": 1}}},
+        ]
+        async for doc in self.collection.aggregate(pipeline):
+            if doc.get("_id") is None:
+                continue
+            counts[oid_str(doc["_id"])] = int(doc.get("count") or 0)
+        return counts
 
     async def create_post(
         self,

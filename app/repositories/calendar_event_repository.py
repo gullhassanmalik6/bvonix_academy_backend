@@ -7,6 +7,7 @@ from bson import ObjectId
 from pymongo import ASCENDING
 
 from app.models.calendar_event import CalendarEvent
+from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
 
@@ -37,7 +38,13 @@ class CalendarEventRepository(BaseRepository[CalendarEvent]):
             created_by=oid_str(doc["created_by"]),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
+
+    async def get_by_id(self, event_id: str) -> CalendarEvent | None:
+        doc = await self.find_document_by_id(event_id)
+        return self._to_model(doc) if doc else None
 
     async def create_event(
         self,
@@ -90,7 +97,7 @@ class CalendarEventRepository(BaseRepository[CalendarEvent]):
         end_date: datetime | None = None,
     ) -> list[CalendarEvent]:
         """Get events for a course or all courses."""
-        filter_dict: dict[str, Any] = {}
+        filter_dict: dict[str, Any] = with_active()
         if course_id:
             try:
                 course_oid = ObjectId(course_id)
@@ -109,9 +116,7 @@ class CalendarEventRepository(BaseRepository[CalendarEvent]):
             else:
                 filter_dict["start_time"] = {"$lte": end_date}
         
-        cursor = self.collection.find(filter_dict).sort("start_time", ASCENDING)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(filter_dict, sort=[("start_time", ASCENDING)])
 
     async def get_student_events(
         self,
@@ -140,6 +145,31 @@ class CalendarEventRepository(BaseRepository[CalendarEvent]):
             else:
                 filter_dict["start_time"] = {"$lte": end_date}
         
-        cursor = self.collection.find(filter_dict).sort("start_time", ASCENDING)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(filter_dict, sort=[("start_time", ASCENDING)])
+
+    async def page_student_events(
+        self,
+        course_ids: list[str],
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[CalendarEvent], int]:
+        """Page the same student-event filter used by get_student_events."""
+        try:
+            course_oids = [ObjectId(cid) for cid in course_ids]
+        except Exception:
+            return [], 0
+        query: dict[str, Any] = {
+            "$or": [
+                {"course_id": {"$in": course_oids}},
+                {"course_id": None},
+            ]
+        }
+        if start_date:
+            query["start_time"] = {"$gte": start_date}
+        if end_date:
+            query.setdefault("start_time", {})
+            query["start_time"]["$lte"] = end_date
+        return await self.find_page(query, skip=skip, limit=limit, sort=[("start_time", ASCENDING)])

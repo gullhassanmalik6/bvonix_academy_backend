@@ -107,6 +107,36 @@ async def get_public_course_decision(
     )
 
 
+_INVALID_CARD = "Card not found or invalid."
+
+
+def _invalid_card(card_number: str) -> StudentCardVerifyResponse:
+    """One response for every card that should not be treated as issued and current."""
+    return StudentCardVerifyResponse(
+        valid=False,
+        card_number=card_number,
+        student_name=None,
+        course_name=None,
+        batch=None,
+        enrollment_date=None,
+        verified_by_admin=False,
+        message=_INVALID_CARD,
+    )
+
+
+def _card_is_current(enrollment) -> bool:
+    """A public card is current only after verification and while the enrollment is active or completed."""
+    if not getattr(enrollment, "verified_by_admin", False):
+        return False
+    if getattr(enrollment, "status", None) not in ("active", "completed"):
+        return False
+    if getattr(enrollment, "payment_status", None) == "refunded":
+        return False
+    if getattr(enrollment, "review_state", None) in ("cancelled", "refunded"):
+        return False
+    return True
+
+
 @router.get("/verify/{card_number}", response_model=StudentCardVerifyResponse)
 async def verify_enrollment_card(
     card_number: str,
@@ -115,39 +145,24 @@ async def verify_enrollment_card(
     user_repo: UserRepository = Depends(get_user_repository),
     course_repo: CourseRepository = Depends(get_course_repository),
 ) -> StudentCardVerifyResponse:
-    """Public QR verification — no authentication required."""
+    """Public QR verification. Invalid cards share one response and include no personal fields."""
     enrollment = await enrollment_repo.get_by_card_number(card_number)
-    if not enrollment:
-        return StudentCardVerifyResponse(
-            valid=False,
-            card_number=card_number,
-            message="Card not found or invalid.",
-        )
+    if enrollment is None or not _card_is_current(enrollment):
+        return _invalid_card(card_number)
 
     student = await student_repo.get_by_id(enrollment.student_id)
     student_user = await user_repo.get_by_id(student.user_id) if student else None
-    course = await course_repo.get_by_id(enrollment.course_id)
+    if student is None or student_user is None:
+        return _invalid_card(card_number)
 
+    course = await course_repo.get_including_archived(enrollment.course_id)
     ref_date = enrollment.enrollment_date
     batch = f"Batch – {ref_date.strftime('%B %Y')}" if ref_date else None
     enroll_str = ref_date.strftime("%d %B %Y") if ref_date else None
-
-    if not enrollment.verified_by_admin:
-        return StudentCardVerifyResponse(
-            valid=False,
-            card_number=card_number,
-            student_name=student_user.full_name if student_user else None,
-            course_name=course.title if course else None,
-            batch=batch,
-            enrollment_date=enroll_str,
-            verified_by_admin=False,
-            message="Enrollment pending admin verification.",
-        )
-
     return StudentCardVerifyResponse(
         valid=True,
         card_number=card_number,
-        student_name=student_user.full_name if student_user else None,
+        student_name=student_user.full_name,
         course_name=course.title if course else None,
         batch=batch,
         enrollment_date=enroll_str,

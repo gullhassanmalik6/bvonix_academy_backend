@@ -6,6 +6,7 @@ from typing import Any
 from bson import ObjectId
 from pymongo import ASCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.assignment import Assignment, AssignmentSubmission
 from app.repositories.base import BaseRepository
 from app.utils.helpers import oid_str
@@ -16,6 +17,7 @@ class AssignmentRepository(BaseRepository[Assignment]):
 
     async def ensure_indexes(self) -> None:
         await self.collection.create_index([("course_id", ASCENDING)])
+        await self.collection.create_index([("course_id", ASCENDING), ("archived_at", ASCENDING)])
         await self.collection.create_index([("course_id", ASCENDING), ("due_date", ASCENDING)])
         await self.collection.create_index([("is_published", ASCENDING)])
 
@@ -33,7 +35,13 @@ class AssignmentRepository(BaseRepository[Assignment]):
             created_by=oid_str(doc["created_by"]),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
+
+    async def get_by_id(self, assignment_id: str) -> Assignment | None:
+        doc = await self.find_document_by_id(assignment_id)
+        return self._to_model(doc) if doc else None
 
     async def list_page(
         self,
@@ -58,13 +66,20 @@ class AssignmentRepository(BaseRepository[Assignment]):
         except Exception:
             return []
         
-        filter_dict: dict[str, Any] = {"course_id": course_oid}
+        query: dict[str, Any] = {"course_id": course_oid}
         if published_only:
-            filter_dict["is_published"] = True
-        
-        cursor = self.collection.find(filter_dict).sort("due_date", ASCENDING)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+            query["is_published"] = True
+        return await self.collect(query, sort=[("due_date", ASCENDING)])
+
+    async def count_for_course(self, course_id: str, *, published_only: bool = True) -> int:
+        """Count assignments with the same filter as list_page. Archived rows stay out."""
+        try:
+            query: dict[str, Any] = {"course_id": ObjectId(course_id)}
+        except Exception:
+            return 0
+        if published_only:
+            query["is_published"] = True
+        return await self.count(query)
 
     async def create_assignment(
         self,
@@ -109,9 +124,10 @@ class AssignmentSubmissionRepository(BaseRepository[AssignmentSubmission]):
 
     async def ensure_indexes(self) -> None:
         # Unique submission per student-assignment
-        await self.collection.create_index(
+        await ensure_required_index(
+            self.collection,
             [("assignment_id", ASCENDING), ("student_id", ASCENDING)],
-            unique=True
+            unique=True,
         )
         await self.collection.create_index([("assignment_id", ASCENDING)])
         await self.collection.create_index([("student_id", ASCENDING)])
@@ -143,9 +159,28 @@ class AssignmentSubmissionRepository(BaseRepository[AssignmentSubmission]):
         except Exception:
             return []
         
-        cursor = self.collection.find({"assignment_id": assignment_oid}).sort("submitted_at", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"assignment_id": assignment_oid},
+            sort=[("submitted_at", -1)],
+        )
+
+    async def page_by_assignment(
+        self,
+        assignment_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[AssignmentSubmission], int]:
+        try:
+            assignment_oid = ObjectId(assignment_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {"assignment_id": assignment_oid},
+            skip=skip,
+            limit=limit,
+            sort=[("submitted_at", -1)],
+        )
 
     async def get_by_student_and_assignment(
         self,

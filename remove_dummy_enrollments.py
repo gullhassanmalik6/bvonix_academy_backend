@@ -1,9 +1,9 @@
 """
-Script to remove dummy enrollment data from the database.
+Disposable demo cleanup. Not a production purge.
 
-This script removes enrollments for students with emails matching:
-- student*@example.com pattern
-- Or any email containing '@example.com'
+Deletes enrollments, results, attendance, and certificates that belong to
+@example.com accounts, plus enrollments whose student record is missing.
+Refuses to run when APP_ENV is production or prod.
 """
 
 import asyncio
@@ -19,9 +19,30 @@ from app.repositories.attendance_repository import AttendanceRepository
 from app.repositories.certificate_repository import CertificateRepository
 
 
+async def _purge_matching(repo, query: dict) -> int:
+    """Delete every matching document in batches. A stuck row stops the script."""
+    removed = 0
+    while True:
+        docs = await repo.collection.find(query).sort([("_id", 1)]).limit(100).to_list(length=100)
+        if not docs:
+            return removed
+        progressed = 0
+        for doc in docs:
+            if await repo.purge_document(str(doc["_id"])):
+                removed += 1
+                progressed += 1
+        if progressed == 0:
+            raise RuntimeError("Matching rows could not be removed")
+
+
 async def remove_dummy_enrollments():
     """Remove dummy enrollments and related data."""
     settings = get_settings()
+    if settings.app_env.lower() in {"production", "prod"}:
+        raise SystemExit(
+            "Refusing to delete demo rows while APP_ENV is production. "
+            "This script only removes @example.com fixture data."
+        )
     client = make_client(settings)
     db = client[settings.mongodb_db]
     
@@ -38,10 +59,12 @@ async def remove_dummy_enrollments():
         attendance_repo = AttendanceRepository(db)
         certificate_repo = CertificateRepository(db)
         
-        # Find all users with @example.com emails (dummy users)
+        # Find users with @example.com emails (dummy users), one page at a time.
         print("\n[1] Finding dummy users (@example.com)...")
-        all_users = await user_repo.list(skip=0, limit=10000)
-        dummy_users = [u for u in all_users if '@example.com' in u.email.lower()]
+        dummy_users = await user_repo.collect(
+            {"email": {"$regex": "@example\\.com", "$options": "i"}},
+            sort=[("email", 1)],
+        )
         
         if not dummy_users:
             print("  No dummy users found.")
@@ -56,45 +79,47 @@ async def remove_dummy_enrollments():
         dummy_student_ids = []
         dummy_user_ids = [u.id for u in dummy_users]
         
-        # Get all students and check their user_id
-        all_students = await student_repo.list(skip=0, limit=10000)
-        for student in all_students:
-            if student.user_id in dummy_user_ids:
-                dummy_student_ids.append(student.id)
-                # Find the user
-                user = next((u for u in dummy_users if u.id == student.user_id), None)
-                print(f"    - Student ID: {student.id} (User: {user.email if user else 'Unknown'})")
+        for user in dummy_users:
+            student = await student_repo.get_by_user_id(user.id)
+            if student is None or student.user_id not in dummy_user_ids:
+                continue
+            dummy_student_ids.append(student.id)
+            print(f"    - Student ID: {student.id} (User: {user.email})")
         
-        # Also find orphaned enrollments (where student doesn't exist)
+        # Walk every enrollment in bounded pages. Keep only disposable rows.
         print("\n[2b] Finding orphaned enrollments (student not found)...")
-        all_enrollments = await enrollment_repo.list(skip=0, limit=10000)
         orphaned_enrollments = []
-        valid_enrollments = []
-        
-        for enrollment in all_enrollments:
-            try:
-                student = await student_repo.get_by_id(enrollment.student_id)
-                if student:
-                    user = await user_repo.get_by_id(student.user_id)
-                    if user and '@example.com' in user.email.lower():
-                        # This is a dummy enrollment
-                        orphaned_enrollments.append(enrollment)
+        valid_count = 0
+        skip = 0
+        while True:
+            page, total = await enrollment_repo.find_page(None, skip=skip, limit=100, sort=[("_id", 1)])
+            if not page:
+                break
+            for enrollment in page:
+                try:
+                    student = await student_repo.get_by_id(enrollment.student_id)
+                    if student:
+                        user = await user_repo.get_by_id(student.user_id)
+                        example_account = bool(user and "@example.com" in user.email.lower())
+                        if example_account or enrollment.student_id in dummy_student_ids:
+                            orphaned_enrollments.append(enrollment)
+                        else:
+                            valid_count += 1
                     else:
-                        valid_enrollments.append(enrollment)
-                else:
-                    # Student not found - orphaned enrollment
+                        orphaned_enrollments.append(enrollment)
+                except Exception:
                     orphaned_enrollments.append(enrollment)
-            except Exception:
-                # Error finding student - consider orphaned
-                orphaned_enrollments.append(enrollment)
+            skip += len(page)
+            if skip >= total:
+                break
         
         if not dummy_student_ids and not orphaned_enrollments:
             print("  No dummy or orphaned enrollments found.")
-            print(f"  Found {len(valid_enrollments)} valid enrollments.")
+            print(f"  Found {valid_count} valid enrollments.")
             return
         
         # Combine dummy and orphaned enrollments (deduplicate by ID)
-        dummy_enrollments = [e for e in all_enrollments if e.student_id in dummy_student_ids] if dummy_student_ids else []
+        dummy_enrollments = [e for e in orphaned_enrollments if e.student_id in dummy_student_ids] if dummy_student_ids else []
         enrollment_ids_seen = set()
         all_dummy_enrollments = []
         for enrollment in dummy_enrollments + orphaned_enrollments:
@@ -106,7 +131,7 @@ async def remove_dummy_enrollments():
         if dummy_enrollments:
             print(f"  Found {len(dummy_enrollments)} enrollments for dummy students")
         print(f"  Total to delete: {len(all_dummy_enrollments)}")
-        print(f"  Valid enrollments to keep: {len(valid_enrollments)}")
+        print(f"  Valid enrollments to keep: {valid_count}")
         
         if not all_dummy_enrollments:
             print("  No enrollments to delete.")
@@ -121,43 +146,33 @@ async def remove_dummy_enrollments():
             'enrollments': 0
         }
         
+        failures = 0
         for enrollment in all_dummy_enrollments:
             enrollment_id = enrollment.id
-            
-            # Delete results
             try:
-                results = await result_repo.collection.find({"enrollment_id": ObjectId(enrollment_id)}).to_list(length=1000)
-                for result in results:
-                    await result_repo.delete(result["_id"])
-                    deleted_counts['results'] += 1
-            except Exception as e:
-                print(f"    Error deleting results for {enrollment_id}: {e}")
-            
-            # Delete attendance
-            try:
-                attendance_records = await attendance_repo.collection.find({"enrollment_id": ObjectId(enrollment_id)}).to_list(length=1000)
-                for record in attendance_records:
-                    await attendance_repo.delete(record["_id"])
-                    deleted_counts['attendance'] += 1
-            except Exception as e:
-                print(f"    Error deleting attendance for {enrollment_id}: {e}")
-            
-            # Delete certificates
-            try:
-                certificates = await certificate_repo.collection.find({"enrollment_id": ObjectId(enrollment_id)}).to_list(length=1000)
-                for cert in certificates:
-                    await certificate_repo.delete(cert["_id"])
-                    deleted_counts['certificates'] += 1
-            except Exception as e:
-                print(f"    Error deleting certificates for {enrollment_id}: {e}")
-            
-            # Delete enrollment
-            try:
-                if await enrollment_repo.delete(enrollment_id):
-                    deleted_counts['enrollments'] += 1
+                deleted_counts["results"] += await _purge_matching(
+                    result_repo, {"enrollment_id": ObjectId(enrollment_id)}
+                )
+                deleted_counts["attendance"] += await _purge_matching(
+                    attendance_repo, {"enrollment_id": ObjectId(enrollment_id)}
+                )
+                deleted_counts["certificates"] += await _purge_matching(
+                    certificate_repo, {"enrollment_id": ObjectId(enrollment_id)}
+                )
+                if await enrollment_repo.purge_document(enrollment_id):
+                    deleted_counts["enrollments"] += 1
                     print(f"    Deleted enrollment: {enrollment_id}")
+                else:
+                    failures += 1
+                    print(f"    Error deleting enrollment {enrollment_id}: row was not removed")
             except Exception as e:
-                print(f"    Error deleting enrollment {enrollment_id}: {e}")
+                failures += 1
+                print(f"    Error deleting data for {enrollment_id}: {e}")
+
+        if failures:
+            raise RuntimeError(
+                f"Cleanup stopped with {failures} enrollment(s) that were not fully removed"
+            )
         
         print("\n" + "=" * 80)
         print("[SUCCESS] Dummy enrollment cleanup completed!")
@@ -173,6 +188,7 @@ async def remove_dummy_enrollments():
         print(f"\n[ERROR] Failed to remove dummy enrollments: {e}")
         import traceback
         traceback.print_exc()
+        raise SystemExit(1) from e
     finally:
         client.close()
 

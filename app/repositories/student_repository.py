@@ -6,10 +6,11 @@ from typing import Any
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.student import Student
 from app.repositories.archival import with_active
 from app.repositories.base import BaseRepository
-from app.repositories.listing import clamp_limit, clamp_skip, sort_pairs, text_clause
+from app.repositories.listing import clamp_limit, clamp_skip, sort_pairs, stable_sort, text_clause
 from app.utils.helpers import oid_str
 
 STUDENT_SORTS = {
@@ -25,7 +26,7 @@ class StudentRepository(BaseRepository[Student]):
 
     async def ensure_indexes(self) -> None:
         # Unique user_id - one student per user
-        await self.collection.create_index([("user_id", ASCENDING)], unique=True)
+        await ensure_required_index(self.collection, [("user_id", ASCENDING)], unique=True)
         # Index on is_active for filtering
         await self.collection.create_index([("is_active", ASCENDING)])
         await self.collection.create_index([("created_at", DESCENDING)])
@@ -53,7 +54,7 @@ class StudentRepository(BaseRepository[Student]):
         sort: str | None = None,
     ) -> tuple[list[Student], int]:
         """Page students in MongoDB. A name search joins the user account in the database."""
-        ordering = sort_pairs(sort, allowed=STUDENT_SORTS, default="-created_at")
+        ordering = stable_sort(sort_pairs(sort, allowed=STUDENT_SORTS, default="-created_at"))
         if not q or not q.strip():
             return await self.find_page({}, skip=skip, limit=limit, sort=ordering)
         safe_skip = clamp_skip(skip)
@@ -90,22 +91,25 @@ class StudentRepository(BaseRepository[Student]):
     async def find_active_by_user_ids(self, user_ids: list[str]) -> list[Student]:
         """Load the active student profiles for an already bounded set of user ids."""
         oids = []
-        for user_id in user_ids[:100]:
+        for user_id in user_ids:
             try:
                 oids.append(ObjectId(user_id))
             except Exception:
                 continue
         if not oids:
             return []
-        docs = await self.collection.find(with_active({"user_id": {"$in": oids}})).to_list(length=len(oids))
-        return [self._to_model(doc) for doc in docs]
+        found: list[Student] = []
+        step = 100
+        for start in range(0, len(oids), step):
+            chunk = oids[start:start + step]
+            docs = await self.collection.find(with_active({"user_id": {"$in": chunk}})).sort(
+                [("_id", ASCENDING)]
+            ).to_list(length=len(chunk))
+            found.extend(self._to_model(doc) for doc in docs)
+        return found
 
     async def get_by_id(self, student_id: str) -> Student | None:
-        try:
-            oid = ObjectId(student_id)
-        except Exception:
-            return None
-        doc = await self.collection.find_one({"_id": oid})
+        doc = await self.find_document_by_id(student_id)
         return self._to_model(doc) if doc else None
 
     async def get_by_user_id(self, user_id: str) -> Student | None:
@@ -141,37 +145,35 @@ class StudentRepository(BaseRepository[Student]):
         payload["_id"] = result.inserted_id
         return self._to_model(payload)
 
-    async def enroll_in_course(self, student_id: str, course_id: str) -> Student | None:
-        """Enroll a student in a course."""
+    async def set_enrolled_courses(
+        self,
+        student_id: str,
+        course_ids: list[str],
+        *,
+        include_archived: bool = False,
+    ) -> Student | None:
+        """Replace the compatibility course list. Other student fields stay as they are."""
         try:
             student_oid = ObjectId(student_id)
-            course_oid = ObjectId(course_id)
+            course_oids: list[ObjectId] = []
+            seen: set[ObjectId] = set()
+            for course_id in course_ids:
+                course_oid = ObjectId(course_id)
+                if course_oid not in seen:
+                    seen.add(course_oid)
+                    course_oids.append(course_oid)
         except Exception:
             return None
-        
+        query: dict[str, Any] = {"_id": student_oid}
+        if not include_archived:
+            query = with_active(query)
         result = await self.collection.find_one_and_update(
-            {"_id": student_oid},
+            query,
             {
-                "$addToSet": {"enrolled_courses": course_oid},
-                "$set": {"updated_at": datetime.now(timezone.utc)},
-            },
-            return_document=True,
-        )
-        return self._to_model(result) if result else None
-
-    async def unenroll_from_course(self, student_id: str, course_id: str) -> Student | None:
-        """Unenroll a student from a course."""
-        try:
-            student_oid = ObjectId(student_id)
-            course_oid = ObjectId(course_id)
-        except Exception:
-            return None
-        
-        result = await self.collection.find_one_and_update(
-            {"_id": student_oid},
-            {
-                "$pull": {"enrolled_courses": course_oid},
-                "$set": {"updated_at": datetime.now(timezone.utc)},
+                "$set": {
+                    "enrolled_courses": course_oids,
+                    "updated_at": datetime.now(timezone.utc),
+                },
             },
             return_document=True,
         )
