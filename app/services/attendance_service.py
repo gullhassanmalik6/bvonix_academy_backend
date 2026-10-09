@@ -79,6 +79,9 @@ class AttendanceService:
         )
         return attendance
 
+    async def get_attendance_by_session(self, student_id: str, course_id: str, date: datetime) -> Attendance | None:
+        return await self._attendances.find_by_session(student_id, course_id, date)
+
     async def get_attendance(self, attendance_id: str) -> Attendance:
         """Get attendance by ID."""
         attendance = await self._attendances.get_by_id(attendance_id)

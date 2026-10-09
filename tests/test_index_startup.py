@@ -19,6 +19,7 @@ _INDEX_REPOSITORIES = (
     "EnrollmentRepository",
     "ResultRepository",
     "AttendanceRepository",
+    "AttendanceClaimRepository",
     "AttendanceCorrectionRepository",
     "CertificateRepository",
     "ScholarshipRepository",

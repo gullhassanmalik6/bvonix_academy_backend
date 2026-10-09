@@ -81,6 +81,8 @@ class EnrollmentRepository(BaseRepository[Enrollment]):
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
             review_state=doc.get("review_state"),
             audit_pending=doc.get("audit_pending") or None,
+            fee_due_date=doc.get("fee_due_date"),
+            access_exception=doc.get("access_exception") or None,
         )
 
     async def list_page(

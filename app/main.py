@@ -23,6 +23,7 @@ from app.repositories.announcement_repository import AnnouncementRepository
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.assignment_repository import AssignmentRepository, AssignmentSubmissionRepository
 from app.repositories.attendance_correction_repository import AttendanceCorrectionRepository
+from app.repositories.attendance_claim_repository import AttendanceClaimRepository
 from app.repositories.attendance_repository import AttendanceRepository
 from app.repositories.certificate_repository import CertificateRepository
 from app.repositories.course_material_repository import CourseMaterialRepository
@@ -87,6 +88,7 @@ async def lifespan(app: FastAPI):
             (EnrollmentRepository, True),
             (ResultRepository, False),
             (AttendanceRepository, True),
+            (AttendanceClaimRepository, True),
             (AttendanceCorrectionRepository, True),
             (CertificateRepository, True),
             (ScholarshipRepository, False),
@@ -173,6 +175,7 @@ def create_app() -> FastAPI:
         "benefit_icons",
         "subject_icons",
         "testimonial_avatars",
+        "course_images",
     ):
         public_dir = uploads_dir / public_name
         public_dir.mkdir(exist_ok=True)

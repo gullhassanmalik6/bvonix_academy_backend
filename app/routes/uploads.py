@@ -13,8 +13,9 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 
+from app.core.admin import get_management_user
 from app.core.auth import get_current_user
-from app.core.dependencies import get_enrollment_repository, get_student_repository
+from app.core.dependencies import get_enrollment_repository, get_payment_repository, get_student_repository
 from app.core.permissions import is_management
 from app.models.user import User
 from app.repositories.enrollment_repository import EnrollmentRepository
@@ -27,9 +28,11 @@ router = APIRouter()
 UPLOAD_BASE = Path("uploads")
 PROFILE_IMAGES_DIR = UPLOAD_BASE / "profile_images"
 PAYMENT_RECEIPTS_DIR = UPLOAD_BASE / "payment_receipts"
+COURSE_IMAGES_DIR = UPLOAD_BASE / "course_images"
 
 PROFILE_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 PAYMENT_RECEIPTS_DIR.mkdir(parents=True, exist_ok=True)
+COURSE_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Allowed file types
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
@@ -44,6 +47,17 @@ _PRIVATE_FILES = {
     "profile-images": ("profile_images", "profile_image_url", {".jpg", ".jpeg", ".png", ".webp"}),
     "enrollment-cards": ("enrollment_cards", "enrollment_card_url", {".pdf"}),
 }
+
+
+def image_suffix(contents: bytes) -> str | None:
+    """Trust the file bytes, not the filename."""
+    if contents.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if contents.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if len(contents) >= 12 and contents.startswith(b"RIFF") and contents[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 def _stored_suffix(filename: str | None, allowed: set[str], default: str) -> str:
@@ -141,16 +155,46 @@ async def download_private_upload(
     current_user: User = Depends(get_current_user),
     enrollments: EnrollmentRepository = Depends(get_enrollment_repository),
     students: StudentRepository = Depends(get_student_repository),
+    payments=Depends(get_payment_repository),
 ) -> FileResponse:
     """Stream a receipt, profile image, or enrollment card after an authorization check."""
     candidate, field, stored_url = _private_file(kind, filename)
     enrollment = await enrollments.find_by_stored_file(field, stored_url)
-    if enrollment is None:
+    payment = None
+    if enrollment is None and kind == "payment-receipts":
+        payment = await payments.find_by_receipt_url(stored_url)
+        if payment is not None and payment.enrollment_id:
+            enrollment = await enrollments.get_by_id(payment.enrollment_id)
+    if enrollment is None and payment is None:
         raise NotFoundError("File not found")
     student = await students.get_by_user_id(current_user.id)
-    owns = student is not None and student.id == enrollment.student_id
+    owner_id = enrollment.student_id if enrollment is not None else payment.student_id
+    owns = student is not None and student.id == owner_id
     if not owns and not is_management(current_user.role):
         raise ForbiddenError("You cannot access this file")
     if not candidate.is_file():
         raise NotFoundError("File not found")
     return FileResponse(candidate, filename=filename)
+
+
+@router.post("/course-image", status_code=status.HTTP_201_CREATED)
+async def upload_course_image(
+    file: UploadFile = File(...),
+    admin_user: User = Depends(get_management_user),
+) -> JSONResponse:
+    """Store a public course image. The caller must be management."""
+    del admin_user
+    contents = await file.read()
+    suffix = image_suffix(contents)
+    if suffix is None:
+        raise AppError("Invalid file type. Only JPEG, PNG, and WebP images are allowed.")
+    if len(contents) > MAX_IMAGE_SIZE:
+        raise AppError(f"File size exceeds maximum allowed size of {MAX_IMAGE_SIZE / 1024 / 1024}MB")
+    unique_filename = f"{secrets.token_hex(16)}{suffix}"
+    file_path = COURSE_IMAGES_DIR / unique_filename
+    with open(file_path, "wb") as stored:
+        stored.write(contents)
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content={"url": f"/uploads/course_images/{unique_filename}", "filename": unique_filename},
+    )

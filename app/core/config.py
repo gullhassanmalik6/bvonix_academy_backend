@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# app/.env, regardless of the directory used to start the server.
+_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 
 class Settings(BaseSettings):
@@ -15,7 +19,7 @@ class Settings(BaseSettings):
     inject across the codebase without hardcoding secrets.
     """
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = Field(default="BvoniX Academy API", alias="APP_NAME")
     app_version: str = Field(default="1.0.0", alias="APP_VERSION")
@@ -37,7 +41,10 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=15, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
 
-    allowed_origins: str = Field(default="http://localhost:5173", alias="ALLOWED_ORIGINS")
+    allowed_origins: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173",
+        alias="ALLOWED_ORIGINS",
+    )
 
     # Enrollment card: academy name and logo (path under uploads, e.g. /uploads/academy_logo.png)
     academy_name: str = Field(default="BvoniX Academy", alias="ACADEMY_NAME")

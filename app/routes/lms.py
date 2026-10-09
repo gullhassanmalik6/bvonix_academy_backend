@@ -23,6 +23,9 @@ from app.core.enrollment_workflow import (
 from app.core.dependencies import (
     get_announcement_service,
     get_require_verified_enrollment,
+    get_student_portal,
+    get_payment_repository,
+    get_attendance_claim_service,
     get_assignment_service,
     get_attendance_correction_service,
     get_attendance_repository,
@@ -66,6 +69,7 @@ from app.schemas.live_session import LiveSessionPublic
 from app.schemas.payment import PaymentPublic
 from app.schemas.result import ResultPublic
 from app.schemas.attendance import AbsenceReasonSubmit, AttendancePublic
+from app.schemas.attendance_claim import AttendanceCheckIn, AttendanceClaimPublic, claim_to_public
 from app.schemas.attendance_correction import (
     AttendanceCorrectionCreate,
     AttendanceCorrectionPublic,
@@ -87,7 +91,20 @@ from app.services.scholarship_service import ScholarshipService
 from app.utils.exceptions import NotFoundError, ConflictError, ForbiddenError, AppError
 from app.utils.helpers import oid_str
 
-router = APIRouter()
+async def _bind_fee_repositories(
+    course_repo: CourseRepository = Depends(get_course_repository),
+    payment_repo=Depends(get_payment_repository),
+):
+    from app.services.fee_access import fee_repositories
+
+    token = fee_repositories.set((course_repo, payment_repo))
+    try:
+        yield
+    finally:
+        fee_repositories.reset(token)
+
+
+router = APIRouter(dependencies=[Depends(_bind_fee_repositories)])
 
 
 async def _course_is_current(course_repo: CourseRepository, course_id: str | None) -> bool:
@@ -128,10 +145,23 @@ async def _course_access(student_id: str, course_id: str, provided, enrollment_r
 
     A list is only accepted from direct tests that already selected the rows.
     The HTTP dependency passes None, which becomes a single find_one.
+    Overdue locks apply when the request bound the fee repositories.
     """
+    from app.services.fee_access import OVERDUE_DETAIL, fee_repositories, is_learning_restricted
+
     if isinstance(provided, list):
-        return next((item for item in provided if getattr(item, "course_id", None) == course_id), None)
-    return await enrollment_repo.get_access_enrollment(student_id, course_id)
+        enrollment = next((item for item in provided if getattr(item, "course_id", None) == course_id), None)
+    else:
+        enrollment = await enrollment_repo.get_access_enrollment(student_id, course_id)
+    bound = fee_repositories.get()
+    if enrollment is not None and bound is not None:
+        course_repo, payment_repo = bound
+        course = await course_repo.get_by_id(enrollment.course_id)
+        payments = await payment_repo.for_enrollment(enrollment.id)
+        price = course.price if course is not None else 0
+        if is_learning_restricted(enrollment, payments, datetime.now(timezone.utc), price):
+            raise ForbiddenError(OVERDUE_DETAIL)
+    return enrollment
 
 
 _GRADE_POINTS = {
@@ -258,12 +288,12 @@ async def get_student_dashboard(
         course = courses.get(e.course_id)
         if course is None:
             continue
-        instructor_name = "Instructor"
+        instructor_name = "Instructor not assigned"
         instructor_specialization = ""
         instructor = instructors.get(course.instructor_id) if course.instructor_id else None
         user = users.get(instructor.user_id) if instructor is not None and record_is_active(instructor) else None
         if instructor is not None and user is not None and record_is_active(user):
-            instructor_name = user.full_name or user.email or "Instructor"
+            instructor_name = user.full_name or user.email or "Instructor not assigned"
             instructor_specialization = instructor.specialization or ""
             if course.instructor_id not in mentors_map:
                 mentors_map[course.instructor_id] = {
@@ -312,7 +342,8 @@ async def get_student_dashboard(
             "progress_percentage": progress,
             "watched_count": watched,
             "total_materials": total_materials,
-            "thumbnail_url": thumbnail_url,
+            "thumbnail_url": thumbnail_url or getattr(course, "image_url", None),
+            "image_url": getattr(course, "image_url", None),
             "enrollment_date": e.enrollment_date.isoformat() if e.enrollment_date else None,
         })
 
@@ -333,6 +364,7 @@ async def upload_payment_receipt(
     enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
     student_repo: StudentRepository = Depends(get_student_repository),
     audit: AuditService = Depends(get_audit_service),
+    payment_repo=Depends(get_payment_repository),
 ) -> EnrollmentPublic:
     """Upload payment receipt URL for an enrollment."""
     # Get enrollment
@@ -379,6 +411,8 @@ async def upload_payment_receipt(
     )
     if not updated_enrollment:
         raise NotFoundError("Failed to update enrollment")
+    if payment_repo is not None and hasattr(payment_repo, "attach_receipt"):
+        await payment_repo.attach_receipt(updated_enrollment.id, payload.receipt_url)
     return enrollment_to_public(updated_enrollment)
 
 
@@ -490,6 +524,51 @@ async def get_all_my_results(
 
 
 # ==================== Attendance ====================
+
+@router.post("/attendance/check-in", status_code=status.HTTP_201_CREATED)
+async def submit_attendance_check_in(
+    payload: AttendanceCheckIn,
+    current_user: User = Depends(get_current_user),
+    student_repo: StudentRepository = Depends(get_student_repository),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+    claims=Depends(get_attendance_claim_service),
+    payment_repo=Depends(get_payment_repository),
+    course_repo: CourseRepository = Depends(get_course_repository),
+):
+    """Record a check-in. It stays pending until an administrator approves it."""
+    student = await student_repo.get_by_user_id(current_user.id)
+    if student is None:
+        raise ForbiddenError("A student profile is required to check in")
+    enrollment = await enrollment_repo.get_access_enrollment(student.id, payload.course_id)
+    if enrollment is None:
+        raise ForbiddenError("You can only check in for a course you are enrolled in")
+    course = await course_repo.get_by_id(payload.course_id)
+    payments = await payment_repo.for_enrollment(enrollment.id)
+    claim = await claims.submit_check_in(
+        student_id=student.id,
+        course_id=payload.course_id,
+        enrollment=enrollment,
+        payments=payments,
+        total_fee=course.price if course is not None else 0,
+    )
+    return claim_to_public(claim)
+
+
+@router.get("/attendance/claims", response_model=PaginatedResponse[AttendanceClaimPublic])
+async def list_my_attendance_claims(
+    course_id: str | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    student_repo: StudentRepository = Depends(get_student_repository),
+    claims=Depends(get_attendance_claim_service),
+) -> PaginatedResponse[AttendanceClaimPublic]:
+    student = await student_repo.get_by_user_id(current_user.id)
+    if student is None:
+        return _page([], 0, skip, limit)
+    rows, total = await claims._claims.page_for_student_course(student.id, course_id, skip=skip, limit=limit)
+    return _page([claim_to_public(item) for item in rows], total, skip, limit)
+
 
 @router.get("/attendance/corrections", response_model=PaginatedResponse[AttendanceCorrectionPublic])
 async def list_my_attendance_corrections(
@@ -1125,6 +1204,7 @@ async def get_course_progress(
     enrollment = await enrollment_repo.get_owned_verified(student.id, enrollment_id)
     if enrollment is None:
         raise NotFoundError("Enrollment not found")
+    await _course_access(student.id, enrollment.course_id, [enrollment], enrollment_repo)
 
     if await _course_is_current(course_repo, enrollment.course_id):
         total_materials = await material_service.count_published(enrollment.course_id)
@@ -1165,7 +1245,8 @@ async def update_course_progress(
     enrollment = await enrollment_repo.get_owned_verified(student.id, enrollment_id)
     if enrollment is None:
         raise NotFoundError("Enrollment not found")
-    
+    await _course_access(student.id, enrollment.course_id, [enrollment], enrollment_repo)
+
     # Validate progress percentage
     if progress_percentage < 0 or progress_percentage > 100:
         raise ValueError("Progress percentage must be between 0 and 100")
@@ -1355,39 +1436,120 @@ async def get_my_calendar_events(
 
 # ==================== Payments ====================
 
+def _payment_public(payment, *, receipt_url: str | None = None, verification_status: str | None = None, course_title: str | None = None) -> PaymentPublic:
+    linked = payment.receipt_url or receipt_url
+    return PaymentPublic(
+        id=payment.id,
+        student_id=payment.student_id,
+        course_id=payment.course_id,
+        enrollment_id=payment.enrollment_id,
+        amount=payment.amount,
+        currency=payment.currency,
+        payment_method=payment.payment_method,
+        payment_status=payment.payment_status,
+        transaction_id=payment.transaction_id,
+        invoice_number=payment.invoice_number,
+        invoice_url=payment.invoice_url,
+        payment_date=payment.payment_date,
+        due_date=payment.due_date,
+        scholarship_discount=payment.scholarship_discount,
+        notes=payment.notes,
+        created_by=payment.created_by,
+        created_at=payment.created_at,
+        updated_at=payment.updated_at,
+        receipt_url=linked,
+        receipt_available=bool(linked),
+        verification_status=verification_status,
+        course_title=course_title,
+    )
+
+
 @router.get("/payments", response_model=PaginatedResponse[PaymentPublic])
 async def get_my_payments(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
-    verified_data: tuple = Depends(get_require_verified_enrollment()),
+    verified_data: tuple = Depends(get_student_portal()),
     payment_service: PaymentService = Depends(get_payment_service),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+    course_repo: CourseRepository = Depends(get_course_repository),
 ) -> PaginatedResponse[PaymentPublic]:
-    """Page payments for the current student."""
+    """Page the current student's ledger payments, including linked receipts."""
     student, _ = verified_data
+    if student is None:
+        return _page([], 0, skip, limit)
     payments, total = await payment_service.list_payments(skip, limit, student_id=student.id)
-    return _page([
-        PaymentPublic(
-            id=p.id,
-            student_id=p.student_id,
-            course_id=p.course_id,
-            enrollment_id=p.enrollment_id,
-            amount=p.amount,
-            currency=p.currency,
-            payment_method=p.payment_method,
-            payment_status=p.payment_status,
-            transaction_id=p.transaction_id,
-            invoice_number=p.invoice_number,
-            invoice_url=p.invoice_url,
-            payment_date=p.payment_date,
-            due_date=p.due_date,
-            scholarship_discount=p.scholarship_discount,
-            notes=p.notes,
-            created_by=p.created_by,
-            created_at=p.created_at,
-            updated_at=p.updated_at,
+    enrollments = {}
+    courses = {}
+    if isinstance(enrollment_repo, EnrollmentRepository):
+        owned, _count = await enrollment_repo.page_for_student(student.id, skip=0, limit=100)
+        enrollments = {item.id: item for item in owned}
+    if isinstance(course_repo, CourseRepository):
+        courses = await course_repo.load_by_ids([item.course_id for item in payments if item.course_id])
+    items = []
+    for payment in payments:
+        enrollment = enrollments.get(payment.enrollment_id or "")
+        course = courses.get(payment.course_id or "")
+        items.append(_payment_public(
+            payment,
+            receipt_url=getattr(enrollment, "payment_receipt_url", None) if enrollment else None,
+            verification_status=workflow_state(enrollment) if enrollment else None,
+            course_title=course.title if course is not None else None,
+        ))
+    return _page(items, total, skip, limit)
+
+
+@router.get("/fee-history")
+async def get_fee_history(
+    portal: tuple = Depends(get_student_portal()),
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+    payment_repo=Depends(get_payment_repository),
+    course_repo: CourseRepository = Depends(get_course_repository),
+    payment_service: PaymentService = Depends(get_payment_service),
+) -> dict:
+    """Fee obligations and ledger payments. Available before learning access is granted."""
+    from app.services.fee_access import fee_summary
+
+    student, _ = portal
+    if student is None:
+        return {"payments": [], "obligations": []}
+    payments, _total = await payment_service.list_payments(0, 100, student_id=student.id)
+    enrollments, _count = await enrollment_repo.page_for_student(student.id, skip=0, limit=100)
+    courses = await course_repo.load_by_ids([item.course_id for item in enrollments])
+    repaired = []
+    for enrollment in enrollments:
+        current = await payment_service.reconcile_enrollment(
+            enrollment.id,
+            courses=course_repo,
+            enrollments=enrollment_repo,
+            actor_id=student.id,
+            actor_role="user",
         )
-        for p in payments
-    ], total, skip, limit)
+        repaired.append(current or enrollment)
+    enrollments = repaired
+    by_enrollment = {item.id: item for item in enrollments}
+    now = datetime.now(timezone.utc)
+    history = []
+    for payment in payments:
+        enrollment = by_enrollment.get(payment.enrollment_id or "")
+        course = courses.get(payment.course_id or "")
+        history.append(_payment_public(
+            payment,
+            receipt_url=getattr(enrollment, "payment_receipt_url", None) if enrollment else None,
+            verification_status=workflow_state(enrollment) if enrollment else None,
+            course_title=course.title if course is not None else None,
+        ).model_dump())
+    obligations = []
+    for enrollment in enrollments:
+        course = courses.get(enrollment.course_id)
+        rows = await payment_repo.for_enrollment(enrollment.id)
+        obligations.append(fee_summary(
+            enrollment,
+            rows,
+            now,
+            course.price if course is not None else 0,
+            course.title if course is not None else None,
+        ))
+    return {"payments": history, "obligations": obligations}
 
 
 # ==================== Forum ====================

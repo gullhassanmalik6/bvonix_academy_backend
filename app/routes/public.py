@@ -26,7 +26,8 @@ from app.repositories.instructor_repository import InstructorRepository
 from app.repositories.student_repository import StudentRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.common import PaginatedResponse
-from app.schemas.course import CourseDecisionPublic, CoursePublic
+from app.schemas.course import CourseDecisionPublic, CoursePublic, course_to_public
+from app.services.instructor_names import names_by_instructor_id
 from app.schemas.student_card import StudentCardVerifyResponse
 from app.services.course_decision import build_course_decision
 from app.services.course_service import CourseService
@@ -40,22 +41,15 @@ async def list_public_courses(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=100),
     service: CourseService = Depends(get_course_service),
+    instructors=Depends(get_instructor_repository),
+    users=Depends(get_user_repository),
 ) -> PaginatedResponse[CoursePublic]:
     """List published courses (no auth required)."""
     courses, total = await service.list_published_courses(skip=skip, limit=limit)
+    names = await names_by_instructor_id([course.instructor_id for course in courses], instructors, users)
     return PaginatedResponse(
         items=[
-            CoursePublic(
-                id=c.id,
-                title=c.title,
-                description=c.description,
-                instructor_id=c.instructor_id,
-                duration_hours=c.duration_hours,
-                price=c.price,
-                is_published=c.is_published,
-                created_at=c.created_at,
-                updated_at=c.updated_at,
-            )
+            course_to_public(c, names.get(c.instructor_id))
             for c in courses
         ],
         total=total,
@@ -68,23 +62,15 @@ async def list_public_courses(
 async def get_public_course(
     course_id: str,
     service: CourseService = Depends(get_course_service),
+    instructors=Depends(get_instructor_repository),
+    users=Depends(get_user_repository),
 ) -> CoursePublic:
     """Get a published course by ID (no auth required)."""
     course = await service.get_course(course_id)
     if not course.is_published:
-        from app.utils.exceptions import NotFoundError
         raise NotFoundError("Course not found")
-    return CoursePublic(
-        id=course.id,
-        title=course.title,
-        description=course.description,
-        instructor_id=course.instructor_id,
-        duration_hours=course.duration_hours,
-        price=course.price,
-        is_published=course.is_published,
-        created_at=course.created_at,
-        updated_at=course.updated_at,
-    )
+    names = await names_by_instructor_id([course.instructor_id], instructors, users)
+    return course_to_public(course, names.get(course.instructor_id))
 
 
 @router.get("/courses/{course_id}/decision", response_model=CourseDecisionPublic)

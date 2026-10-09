@@ -117,6 +117,8 @@ class EnrollmentPublic(APIModel):
     verified_by: str | None = None
     review_state: str | None = None
     workflow_state: str | None = None
+    fee_due_date: datetime | None = None
+    access_exception: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -150,9 +152,20 @@ def enrollment_to_public(enrollment) -> EnrollmentPublic:
         verified_by=enrollment.verified_by,
         review_state=getattr(enrollment, "review_state", None),
         workflow_state=workflow_state(enrollment),
+        fee_due_date=getattr(enrollment, "fee_due_date", None),
+        access_exception=getattr(enrollment, "access_exception", None),
         created_at=enrollment.created_at,
         updated_at=enrollment.updated_at,
     )
+
+
+class FeeDueUpdate(APIModel):
+    fee_due_date: datetime | None = None
+
+
+class AccessExceptionRequest(APIModel):
+    reason: str = Field(min_length=5, max_length=500)
+    expires_at: datetime | None = None
 
 
 class EnrollmentTransitionRequest(APIModel):

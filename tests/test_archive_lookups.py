@@ -393,7 +393,7 @@ class DashboardArchiveTests(unittest.TestCase):
             )
         )
         self.assertEqual(payload["mentors"], [])
-        self.assertEqual(payload["enrollments"][0]["instructor_name"], "Instructor")
+        self.assertEqual(payload["enrollments"][0]["instructor_name"], "Instructor not assigned")
         self.assertNotIn("Hidden Instructor", str(payload))
         self.assertNotIn("Secret", str(payload))
 

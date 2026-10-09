@@ -87,6 +87,9 @@ class CourseService:
         """Create a new course. The instructor id must refer to a stored instructor profile."""
         if instructors is not None and await instructors.get_by_id(payload.instructor_id) is None:
             raise NotFoundError("Instructor not found")
+        image_url = getattr(payload, "image_url", None)
+        if image_url is not None and not str(image_url).startswith("/uploads/course_images/"):
+            raise ConflictError("Course image must be stored by the academy upload")
         try:
             return await self._courses.create_course(
                 title=payload.title,
@@ -95,6 +98,7 @@ class CourseService:
                 duration_hours=payload.duration_hours,
                 price=payload.price,
                 is_published=payload.is_published,
+                image_url=image_url,
             )
         except ValueError as e:
             raise NotFoundError(str(e)) from e
@@ -143,6 +147,12 @@ class CourseService:
             update_data["price"] = payload.price
         if publishing:
             update_data["is_published"] = payload.is_published
+        if payload.clear_image:
+            update_data["image_url"] = None
+        elif payload.image_url is not None:
+            if not str(payload.image_url).startswith("/uploads/course_images/"):
+                raise ConflictError("Course image must be stored by the academy upload")
+            update_data["image_url"] = payload.image_url
         
         if not update_data:
             return course

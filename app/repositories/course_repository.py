@@ -37,6 +37,7 @@ class CourseRepository(BaseRepository[Course]):
             duration_hours=doc["duration_hours"],
             price=doc["price"],
             is_published=doc.get("is_published", False),
+            image_url=doc.get("image_url"),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
             archived_at=doc.get("archived_at"),
@@ -99,6 +100,7 @@ class CourseRepository(BaseRepository[Course]):
         duration_hours: int,
         price: float,
         is_published: bool = False,
+        image_url: str | None = None,
     ) -> Course:
         now = datetime.now(timezone.utc)
         try:
@@ -113,6 +115,7 @@ class CourseRepository(BaseRepository[Course]):
             "duration_hours": duration_hours,
             "price": price,
             "is_published": is_published,
+            "image_url": image_url,
             "created_at": now,
             "updated_at": now,
         }

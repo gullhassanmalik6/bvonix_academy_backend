@@ -9,8 +9,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.services.audit_context import capture_audit_request
+from app.utils.exceptions import NotFoundError
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.core.academy_metrics import attendance_summary
@@ -26,7 +27,9 @@ from app.core.dependencies import (
     get_announcement_service,
     get_assignment_service,
     get_attendance_correction_service,
+    get_attendance_claim_service,
     get_attendance_service,
+    get_payment_repository,
     get_course_material_service,
     get_course_repository,
     get_course_service,
@@ -72,13 +75,17 @@ from app.schemas.attendance_correction import (
     AttendanceCorrectionPublic,
     correction_to_public,
 )
-from app.schemas.course import CourseCreate, CoursePublic, CourseUpdate
+from app.schemas.course import CourseCreate, CoursePublic, CourseUpdate, course_to_public
+from app.services.instructor_names import names_by_instructor_id, display_name
 from app.schemas.course_material import CourseMaterialCreate, CourseMaterialPublic, CourseMaterialUpdate
 from app.schemas.instructor import InstructorCreate, InstructorPublic, InstructorUpdate
 from app.schemas.live_session import LiveSessionCreate, LiveSessionPublic, LiveSessionUpdate
 from app.schemas.payment import PaymentCreate, PaymentPublic, PaymentUpdate
+from app.schemas.attendance_claim import AttendanceClaimDecision, AttendanceClaimPublic, claim_to_public
 from app.schemas.enrollment import (
+    AccessExceptionRequest,
     EnrollmentCardForm,
+    FeeDueUpdate,
     EnrollmentCardFormUpdate,
     EnrollmentPublic,
     EnrollmentTransitionRequest,
@@ -89,7 +96,8 @@ from app.schemas.scholarship import ScholarshipCreate, ScholarshipPublic, Schola
 from app.schemas.student import StudentCreate, StudentPublic, StudentUpdate
 from app.schemas.user import AdminUserCreate, UserPublic, UserUpdate
 from app.services.announcement_service import AnnouncementService
-from app.services.audit_service import AuditService, snapshot
+from app.services.audit_service import AuditService, snapshot, write_audit
+from app.services.fee_access import fee_summary, normalize_fee_due_date
 from app.services.assignment_service import AssignmentService
 from app.services.attendance_correction_service import AttendanceCorrectionService
 from app.services.attendance_service import AttendanceService
@@ -116,28 +124,18 @@ async def admin_list_courses(
     published_only: bool = Query(default=False),
     service: CourseService = Depends(get_course_service),
     admin_user: User = Depends(get_management_user),
+    instructors: InstructorRepository = Depends(get_instructor_repository),
+    users: UserRepository = Depends(get_user_repository),
 ) -> PaginatedResponse[CoursePublic]:
     """List all courses (admin only)."""
+    del admin_user
     if published_only:
         courses, total = await service.list_published_courses(skip=skip, limit=limit)
     else:
         courses, total = await service.list_courses(skip=skip, limit=limit)
-    
+    names = await names_by_instructor_id([course.instructor_id for course in courses], instructors, users)
     return PaginatedResponse(
-        items=[
-            CoursePublic(
-                id=c.id,
-                title=c.title,
-                description=c.description,
-                instructor_id=c.instructor_id,
-                duration_hours=c.duration_hours,
-                price=c.price,
-                is_published=c.is_published,
-                created_at=c.created_at,
-                updated_at=c.updated_at,
-            )
-            for c in courses
-        ],
+        items=[course_to_public(course, names.get(course.instructor_id)) for course in courses],
         total=total,
         skip=skip,
         limit=limit,
@@ -150,20 +148,13 @@ async def admin_create_course(
     service: CourseService = Depends(get_course_service),
     instructors: InstructorRepository = Depends(get_instructor_repository),
     admin_user: User = Depends(get_management_user),
+    users: UserRepository = Depends(get_user_repository),
 ) -> CoursePublic:
     """Create a new course (admin only)."""
+    del admin_user
     course = await service.create_course(payload, instructors=instructors)
-    return CoursePublic(
-        id=course.id,
-        title=course.title,
-        description=course.description,
-        instructor_id=course.instructor_id,
-        duration_hours=course.duration_hours,
-        price=course.price,
-        is_published=course.is_published,
-        created_at=course.created_at,
-        updated_at=course.updated_at,
-    )
+    names = await names_by_instructor_id([course.instructor_id], instructors, users)
+    return course_to_public(course, names.get(course.instructor_id))
 
 
 @router.patch("/courses/{course_id}", response_model=CoursePublic)
@@ -173,6 +164,7 @@ async def admin_update_course(
     service: CourseService = Depends(get_course_service),
     instructors: InstructorRepository = Depends(get_instructor_repository),
     admin_user: User = Depends(get_management_user),
+    users: UserRepository = Depends(get_user_repository),
 ) -> CoursePublic:
     """Update a course (admin only)."""
     course = await service.update_course(
@@ -181,17 +173,8 @@ async def admin_update_course(
         actor_role=admin_user.role,
         instructors=instructors,
     )
-    return CoursePublic(
-        id=course.id,
-        title=course.title,
-        description=course.description,
-        instructor_id=course.instructor_id,
-        duration_hours=course.duration_hours,
-        price=course.price,
-        is_published=course.is_published,
-        created_at=course.created_at,
-        updated_at=course.updated_at,
-    )
+    names = await names_by_instructor_id([course.instructor_id], instructors, users)
+    return course_to_public(course, names.get(course.instructor_id))
 
 
 @router.delete("/courses/{course_id}")
@@ -312,15 +295,18 @@ async def admin_list_instructors(
     limit: int = Query(default=100, ge=1, le=100),
     service: InstructorService = Depends(get_instructor_service),
     admin_user: User = Depends(get_management_user),
+    users: UserRepository = Depends(get_user_repository),
 ) -> PaginatedResponse[InstructorPublic]:
     """List all instructors (admin only)."""
+    del admin_user
     instructors, total = await service.list_instructors(skip=skip, limit=limit)
-    
+    people = await users.load_by_ids([item.user_id for item in instructors if item.user_id])
     return PaginatedResponse(
         items=[
             InstructorPublic(
                 id=i.id,
                 user_id=i.user_id,
+                full_name=display_name(people.get(i.user_id)),
                 bio=i.bio,
                 specialization=i.specialization,
                 years_of_experience=i.years_of_experience,
@@ -648,7 +634,8 @@ async def admin_create_attendance(
     service: AttendanceService = Depends(get_attendance_service),
     admin_user: User = Depends(get_management_user),
 ) -> AttendancePublic:
-    """Mark attendance for a student (admin only)."""
+    """Mark attendance for a student (admin only). The marker is the signed-in administrator."""
+    payload = payload.model_copy(update={"marked_by": admin_user.id})
     attendance = await service.create_attendance(payload)
     return AttendancePublic(
         id=attendance.id,
@@ -691,6 +678,139 @@ async def admin_update_attendance(
         created_at=attendance.created_at,
         updated_at=attendance.updated_at,
     )
+
+
+@router.get("/attendance/claims", response_model=list[AttendanceClaimPublic])
+async def admin_list_attendance_claims(
+    course_id: str,
+    session_date: datetime,
+    claims=Depends(get_attendance_claim_service),
+    admin_user: User = Depends(get_management_user),
+) -> list[AttendanceClaimPublic]:
+    """Check-ins for one course and day. Pending rows are not official attendance."""
+    del admin_user
+    from app.services.attendance_claim_service import session_day
+
+    rows = await claims._claims.list_for_course_date(course_id, session_day(session_date))
+    return [claim_to_public(item) for item in rows]
+
+
+@router.post("/attendance/claims/{claim_id}/decide", response_model=AttendanceClaimPublic)
+async def admin_decide_attendance_claim(
+    claim_id: str,
+    payload: AttendanceClaimDecision,
+    claims=Depends(get_attendance_claim_service),
+    admin_user: User = Depends(get_management_user),
+) -> AttendanceClaimPublic:
+    """Approve, reject, or mark absent. Approval is the only path to official present."""
+    updated = await claims.decide(
+        claim_id,
+        action=payload.action,
+        reason=payload.reason,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+    )
+    official = "present" if updated.status == "approved" else ("absent" if updated.attendance_id else None)
+    return claim_to_public(updated, official)
+
+
+@router.get("/enrollments/{enrollment_id}/fee-summary")
+async def admin_fee_summary(
+    enrollment_id: str,
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+    payment_repo=Depends(get_payment_repository),
+    course_repo: CourseRepository = Depends(get_course_repository),
+    admin_user: User = Depends(get_payment_admin),
+    payment_service: PaymentService = Depends(get_payment_service),
+) -> dict:
+    """Total fee, confirmed payments, and outstanding balance for one enrollment."""
+    enrollment = await enrollment_repo.get_by_id(enrollment_id)
+    if enrollment is None:
+        raise NotFoundError("Enrollment not found")
+    repaired = await payment_service.reconcile_enrollment(
+        enrollment.id,
+        courses=course_repo,
+        enrollments=enrollment_repo,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+    )
+    if repaired is not None:
+        enrollment = repaired
+    course = await course_repo.get_by_id(enrollment.course_id)
+    payments = await payment_repo.for_enrollment(enrollment.id)
+    return fee_summary(
+        enrollment,
+        payments,
+        datetime.now(timezone.utc),
+        course.price if course is not None else 0,
+        course.title if course is not None else None,
+    )
+
+
+@router.patch("/enrollments/{enrollment_id}/fee-due-date", response_model=EnrollmentPublic)
+async def admin_set_fee_due_date(
+    enrollment_id: str,
+    payload: FeeDueUpdate,
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+    audit: AuditService = Depends(get_audit_service),
+    admin_user: User = Depends(get_payment_admin),
+) -> EnrollmentPublic:
+    """Set or clear the fee due date. Other enrollment and payment fields stay as they are."""
+    enrollment = await enrollment_repo.get_by_id(enrollment_id)
+    if enrollment is None:
+        raise NotFoundError("Enrollment not found")
+    due = normalize_fee_due_date(payload.fee_due_date)
+    updated = await enrollment_repo.update(
+        enrollment_id,
+        {"fee_due_date": due, "updated_at": datetime.now(timezone.utc)},
+    )
+    await write_audit(
+        audit,
+        action="enrollment.fee_due_date",
+        entity_type="enrollment",
+        entity_id=enrollment_id,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+        previous=enrollment,
+        current=updated,
+    )
+    return enrollment_to_public(updated)
+
+
+@router.post("/enrollments/{enrollment_id}/access-exception", response_model=EnrollmentPublic)
+async def admin_grant_access_exception(
+    enrollment_id: str,
+    payload: AccessExceptionRequest,
+    enrollment_repo: EnrollmentRepository = Depends(get_enrollment_repository),
+    audit: AuditService = Depends(get_audit_service),
+    admin_user: User = Depends(get_payment_admin),
+) -> EnrollmentPublic:
+    """Restore learning access without marking the fee paid."""
+    enrollment = await enrollment_repo.get_by_id(enrollment_id)
+    if enrollment is None:
+        raise NotFoundError("Enrollment not found")
+    exception = {
+        "reason": payload.reason.strip(),
+        "approved_by": admin_user.id,
+        "approved_at": datetime.now(timezone.utc),
+        "expires_at": payload.expires_at,
+    }
+    updated = await enrollment_repo.update(
+        enrollment_id,
+        {"access_exception": exception, "updated_at": datetime.now(timezone.utc)},
+    )
+    await write_audit(
+        audit,
+        action="enrollment.access_exception",
+        entity_type="enrollment",
+        entity_id=enrollment_id,
+        actor_id=admin_user.id,
+        actor_role=admin_user.role,
+        previous=enrollment,
+        current=updated,
+        context={"reason": exception["reason"]},
+    )
+    return enrollment_to_public(updated)
 
 
 @router.get("/attendance/corrections", response_model=PaginatedResponse[AttendanceCorrectionPublic])
@@ -1328,9 +1448,17 @@ async def admin_create_payment(
     payload: PaymentCreate,
     service: PaymentService = Depends(get_payment_service),
     admin_user: User = Depends(get_payment_admin),
+    courses: CourseRepository = Depends(get_course_repository),
+    enrollments: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> PaymentPublic:
-    """Create a new payment record (admin only)."""
-    payment = await service.create_payment(payload, admin_user.id, actor_role=admin_user.role)
+    """Create a ledger payment. Cash recorded as received does not need a receipt."""
+    payment = await service.create_payment(
+        payload,
+        admin_user.id,
+        actor_role=admin_user.role,
+        courses=courses,
+        enrollments=enrollments,
+    )
     return PaymentPublic(
         id=payment.id,
         student_id=payment.student_id,
@@ -1359,6 +1487,8 @@ async def admin_update_payment(
     payload: PaymentUpdate,
     service: PaymentService = Depends(get_payment_service),
     admin_user: User = Depends(get_payment_admin),
+    courses: CourseRepository = Depends(get_course_repository),
+    enrollments: EnrollmentRepository = Depends(get_enrollment_repository),
 ) -> PaymentPublic:
     """Update a payment (admin only)."""
     payment = await service.update_payment(
@@ -1366,6 +1496,8 @@ async def admin_update_payment(
         payload,
         actor_role=admin_user.role,
         actor_id=admin_user.id,
+        courses=courses,
+        enrollments=enrollments,
     )
     return PaymentPublic(
         id=payment.id,

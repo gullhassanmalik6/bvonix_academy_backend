@@ -24,6 +24,7 @@ class InstructorUpdate(APIModel):
 class InstructorPublic(APIModel):
     id: str
     user_id: str
+    full_name: str | None = None
     bio: str | None
     specialization: str | None
     years_of_experience: int | None

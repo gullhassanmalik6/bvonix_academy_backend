@@ -76,6 +76,18 @@ class AttendanceRepository(BaseRepository[Attendance]):
             return [], 0
         return await self.find_page(query, skip=skip, limit=limit, sort=[("date", -1)])
 
+    async def find_by_session(self, student_id: str, course_id: str, date: datetime) -> Attendance | None:
+        try:
+            query = {
+                "student_id": ObjectId(student_id),
+                "course_id": ObjectId(course_id),
+                "date": date,
+            }
+        except Exception:
+            return None
+        doc = await self.collection.find_one(with_active(query))
+        return self._to_model(doc) if doc else None
+
     async def get_by_enrollment(self, enrollment_id: str) -> list[Attendance]:
         """Get all attendance records for an enrollment."""
         try:

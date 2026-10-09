@@ -11,31 +11,27 @@ from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.core.admin import get_management_user
 from app.core.auth import get_current_user
-from app.core.dependencies import get_course_repository, get_course_service, get_instructor_repository
+from app.core.dependencies import get_course_repository, get_course_service, get_instructor_repository, get_user_repository
 from app.core.permissions import can_manage_course, is_management
 from app.repositories.instructor_repository import InstructorRepository
 from app.utils.exceptions import ForbiddenError, NotFoundError
 from app.models.user import User
 from app.repositories.course_repository import CourseRepository
 from app.schemas.common import PaginatedResponse
-from app.schemas.course import CourseCreate, CoursePublic, CourseUpdate
+from app.schemas.course import CourseCreate, CoursePublic, CourseUpdate, course_to_public
+from app.services.instructor_names import names_by_instructor_id
 from app.services.course_service import CourseService
 
 router = APIRouter()
 
 
-def _course_public(course) -> CoursePublic:
-    return CoursePublic(
-        id=course.id,
-        title=course.title,
-        description=course.description,
-        instructor_id=course.instructor_id,
-        duration_hours=course.duration_hours,
-        price=course.price,
-        is_published=course.is_published,
-        created_at=course.created_at,
-        updated_at=course.updated_at,
-    )
+def _course_public(course, instructor_name: str | None = None) -> CoursePublic:
+    return course_to_public(course, instructor_name)
+
+
+async def _with_names(courses, instructors, users) -> list[CoursePublic]:
+    names = await names_by_instructor_id([course.instructor_id for course in courses], instructors, users)
+    return [_course_public(course, names.get(course.instructor_id)) for course in courses]
 
 
 async def _can_see_drafts(current_user: User, instructor_id: str, instructors: InstructorRepository) -> bool:
@@ -54,6 +50,8 @@ async def list_courses(
     published_only: bool = Query(default=False),
     service: CourseService = Depends(get_course_service),
     current_user: User = Depends(get_current_user),
+    instructors: InstructorRepository = Depends(get_instructor_repository),
+    users=Depends(get_user_repository),
 ) -> PaginatedResponse[CoursePublic]:
     """Page courses. Students and other non-management accounts see published courses."""
     if published_only or not is_management(current_user.role):
@@ -62,7 +60,7 @@ async def list_courses(
         courses, total = await service.list_courses(skip=skip, limit=limit)
     
     return PaginatedResponse(
-        items=[_course_public(course) for course in courses],
+        items=await _with_names(courses, instructors, users),
         total=total,
         skip=skip,
         limit=limit,
@@ -75,12 +73,14 @@ async def get_course(
     service: CourseService = Depends(get_course_service),
     current_user: User = Depends(get_current_user),
     instructors: InstructorRepository = Depends(get_instructor_repository),
+    users=Depends(get_user_repository),
 ) -> CoursePublic:
     """Get a course by ID. Unpublished courses stay hidden from other accounts."""
     course = await service.get_course(course_id)
     if not course.is_published and not await _can_see_drafts(current_user, course.instructor_id, instructors):
         raise NotFoundError("Course not found")
-    return _course_public(course)
+    named = await _with_names([course], instructors, users)
+    return named[0]
 
 
 @router.get("/instructor/{instructor_id}/courses", response_model=PaginatedResponse[CoursePublic])

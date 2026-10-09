@@ -7,6 +7,7 @@ from app.repositories.announcement_repository import AnnouncementRepository
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.assignment_repository import AssignmentRepository, AssignmentSubmissionRepository
 from app.repositories.attendance_correction_repository import AttendanceCorrectionRepository
+from app.repositories.attendance_claim_repository import AttendanceClaimRepository
 from app.repositories.attendance_repository import AttendanceRepository
 from app.repositories.calendar_event_repository import CalendarEventRepository
 from app.repositories.notification_repository import NotificationRepository
@@ -28,6 +29,7 @@ from app.services.audit_service import AuditService
 from app.services.assignment_service import AssignmentService
 from app.services.auth_service import AuthService
 from app.services.attendance_correction_service import AttendanceCorrectionService
+from app.services.attendance_claim_service import AttendanceClaimService
 from app.services.attendance_service import AttendanceService
 from app.services.calendar_event_service import CalendarEventService
 from app.services.notification_service import NotificationService
@@ -140,6 +142,20 @@ def get_require_verified_enrollment():
     return _require_verified_enrollment
 
 
+def get_student_portal():
+    """Signed-in student profile. Fee pages stay available before verification."""
+    from app.core.auth import get_current_user
+
+    async def _student_portal(
+        current_user=Depends(get_current_user),
+        student_repo: StudentRepository = Depends(get_student_repository),
+    ):
+        student = await student_repo.get_by_user_id(current_user.id)
+        return (student, None)
+
+    return _student_portal
+
+
 def get_result_repository() -> ResultRepository:
     return ResultRepository(mongodb.db)
 
@@ -185,6 +201,18 @@ def get_attendance_service(
     audit: AuditService = Depends(get_audit_service),
 ) -> AttendanceService:
     return AttendanceService(attendances, scholarships, scholarship_service, audit=audit)
+
+
+def get_attendance_claim_repository() -> AttendanceClaimRepository:
+    return AttendanceClaimRepository(mongodb.db)
+
+
+def get_attendance_claim_service(
+    claims: AttendanceClaimRepository = Depends(get_attendance_claim_repository),
+    attendances: AttendanceService = Depends(get_attendance_service),
+    audit: AuditService = Depends(get_audit_service),
+) -> AttendanceClaimService:
+    return AttendanceClaimService(claims, attendances, audit=audit)
 
 
 def get_attendance_correction_repository() -> AttendanceCorrectionRepository:

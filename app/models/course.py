@@ -21,6 +21,7 @@ class Course:
     is_published: bool
     created_at: datetime
     updated_at: datetime
+    image_url: str | None = None
     archived_at: datetime | None = None
     archived_by: str | None = None
 
