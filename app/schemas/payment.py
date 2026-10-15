@@ -17,6 +17,9 @@ class PaymentCreate(APIModel):
     due_date: datetime | None = None
     scholarship_discount: float = Field(default=0.0, ge=0)
     notes: str | None = Field(default=None, max_length=500)
+    payment_date: datetime | None = None
+    record_as_received: bool = False
+    client_request_id: str | None = Field(default=None, max_length=80)
 
 
 class PaymentUpdate(APIModel):
@@ -47,3 +50,7 @@ class PaymentPublic(APIModel):
     created_by: str | None
     created_at: datetime
     updated_at: datetime
+    receipt_url: str | None = None
+    receipt_available: bool = False
+    verification_status: str | None = None
+    course_title: str | None = None

@@ -16,7 +16,15 @@ class CourseMaterialRepository(BaseRepository[CourseMaterial]):
 
     async def ensure_indexes(self) -> None:
         await self.collection.create_index([("course_id", ASCENDING)])
+        await self.collection.create_index([("course_id", ASCENDING), ("archived_at", ASCENDING)])
         await self.collection.create_index([("course_id", ASCENDING), ("order", ASCENDING)])
+        await self.collection.create_index([
+            ("course_id", ASCENDING),
+            ("is_published", ASCENDING),
+            ("archived_at", ASCENDING),
+            ("order", ASCENDING),
+            ("created_at", ASCENDING),
+        ])
         await self.collection.create_index([("is_published", ASCENDING)])
 
     def _to_model(self, doc: dict[str, Any]) -> CourseMaterial:
@@ -36,7 +44,13 @@ class CourseMaterialRepository(BaseRepository[CourseMaterial]):
             created_by=oid_str(doc["created_by"]),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            archived_at=doc.get("archived_at"),
+            archived_by=doc.get("archived_by"),
         )
+
+    async def get_by_id(self, material_id: str) -> CourseMaterial | None:
+        doc = await self.find_document_by_id(material_id)
+        return self._to_model(doc) if doc else None
 
     async def list_page(
         self,
@@ -61,13 +75,49 @@ class CourseMaterialRepository(BaseRepository[CourseMaterial]):
         except Exception:
             return []
         
-        filter_dict: dict[str, Any] = {"course_id": course_oid}
+        query: dict[str, Any] = {"course_id": course_oid}
         if published_only:
-            filter_dict["is_published"] = True
-        
-        cursor = self.collection.find(filter_dict).sort("order", ASCENDING)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+            query["is_published"] = True
+        return await self.collect(query, sort=[("order", ASCENDING), ("created_at", ASCENDING)])
+
+    async def count_for_course(self, course_id: str, *, published_only: bool = True) -> int:
+        """Count materials with the same filter as list_page. Archived rows stay out."""
+        try:
+            query: dict[str, Any] = {"course_id": ObjectId(course_id)}
+        except Exception:
+            return 0
+        if published_only:
+            query["is_published"] = True
+        return await self.count(query)
+
+    async def find_published_for_courses(self, course_ids: list[str]) -> dict[str, list[CourseMaterial]]:
+        """Load published materials for many courses without one query per course."""
+        from app.repositories.listing import MAX_PAGE_SIZE
+
+        oids = []
+        for raw in course_ids:
+            try:
+                oids.append(ObjectId(raw))
+            except Exception:
+                continue
+        grouped: dict[str, list[CourseMaterial]] = {}
+        step = MAX_PAGE_SIZE
+        for start in range(0, len(oids), step):
+            chunk = oids[start:start + step]
+            skip = 0
+            while True:
+                page, total = await self.find_page(
+                    {"course_id": {"$in": chunk}, "is_published": True},
+                    skip=skip,
+                    limit=MAX_PAGE_SIZE,
+                    sort=[("order", ASCENDING), ("created_at", ASCENDING)],
+                )
+                for item in page:
+                    grouped.setdefault(item.course_id, []).append(item)
+                skip += len(page)
+                if not page or skip >= total:
+                    break
+        return grouped
 
     async def create_material(
         self,

@@ -20,15 +20,17 @@ router = APIRouter()
 @router.get("", response_model=list[NotificationPublic])
 async def get_my_notifications(
     unread_only: bool = Query(default=False, description="Filter to unread notifications only"),
-    limit: int = Query(default=50, ge=1, le=100, description="Maximum number of notifications to return"),
+    skip: int = Query(default=0, ge=0, description="Number of matching notifications to skip"),
+    limit: int = Query(default=50, ge=1, le=100, description="Page size. This route returns one page, not the full inbox."),
     current_user: User = Depends(get_current_user),
     notification_service: NotificationService = Depends(get_notification_service),
 ) -> list[NotificationPublic]:
-    """Get notifications for current user."""
+    """Get one page of notifications for the current user."""
     notifications = await notification_service.get_notifications(
         current_user.id,
         unread_only=unread_only,
         limit=limit,
+        skip=skip,
     )
     return [
         NotificationPublic(

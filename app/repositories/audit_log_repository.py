@@ -5,9 +5,10 @@ from typing import Any
 
 from pymongo import ASCENDING, DESCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.audit_log import AuditLog
 from app.repositories.base import BaseRepository
-from app.repositories.listing import clamp_limit, clamp_skip, text_clause
+from app.repositories.listing import clamp_limit, clamp_skip, stable_sort, text_clause
 from app.utils.helpers import oid_str
 
 
@@ -21,6 +22,7 @@ class AuditLogRepository(BaseRepository[AuditLog]):
             [("entity_type", ASCENDING), ("entity_id", ASCENDING), ("created_at", DESCENDING)]
         )
         await self.collection.create_index([("action", ASCENDING), ("created_at", DESCENDING)])
+        await ensure_required_index(self.collection, [("operation_id", ASCENDING)], unique=True, sparse=True)
 
     def _to_model(self, doc: dict[str, Any]) -> AuditLog:
         return AuditLog(
@@ -58,12 +60,28 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         total = await self.collection.count_documents(query)
         cursor = (
             self.collection.find(query)
-            .sort("created_at", DESCENDING)
+            .sort(stable_sort([("created_at", DESCENDING)]))
             .skip(safe_skip)
             .limit(safe_limit)
         )
         docs = await cursor.to_list(length=safe_limit)
         return [self._to_model(doc) for doc in docs], total
+
+    async def find_by_operation_id(self, operation_id: str) -> AuditLog | None:
+        if not operation_id:
+            return None
+        doc = await self.collection.find_one({"operation_id": operation_id})
+        return self._to_model(doc) if doc else None
+
+    async def update(self, doc_id: str, update_data: dict[str, Any]) -> AuditLog | None:
+        """Audit rows are not edited through the application."""
+        del doc_id, update_data
+        return None
+
+    async def purge_document(self, doc_id: str) -> bool:
+        """Audit rows are not deleted through the application."""
+        del doc_id
+        return False
 
     async def create(self, document: dict[str, Any]) -> AuditLog:
         result = await self.collection.insert_one(document)

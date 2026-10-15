@@ -43,6 +43,9 @@ class Enrollment:
     created_at: datetime
     updated_at: datetime
     review_state: str | None = None
+    audit_pending: dict | None = None
+    fee_due_date: datetime | None = None
+    access_exception: dict | None = None
 
     @staticmethod
     def now_utc() -> datetime:

@@ -38,8 +38,8 @@ class MongoDB:
             self._client = make_client(settings)
             self._db = self._client[settings.mongodb_db]
         except Exception as e:
-            logger.error("Failed to create MongoDB client: %s", e)
-            raise RuntimeError(f"MongoDB client creation failed: {e}") from e
+            logger.error("Failed to create MongoDB client.")
+            raise RuntimeError("MongoDB client creation failed.") from e
 
         import asyncio
 
@@ -47,9 +47,8 @@ class MongoDB:
             await asyncio.wait_for(self._client.admin.command("ping"), timeout=3.0)
             logger.info("MongoDB connection test successful")
             return True
-        except Exception as e:
-            detail = str(e).strip() or type(e).__name__
-            logger.error("MongoDB did not respond during startup: %s", detail)
+        except Exception:
+            logger.error("MongoDB did not respond during startup.")
             return False
 
     async def ping(self) -> bool:

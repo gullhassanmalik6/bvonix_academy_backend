@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.permissions import is_management
 from app.repositories.assignment_repository import AssignmentRepository, AssignmentSubmissionRepository
+from app.repositories.course_repository import CourseRepository
 from app.schemas.assignment import (
     AssignmentCreate,
     AssignmentSubmissionCreate,
@@ -10,8 +12,10 @@ from app.schemas.assignment import (
     AssignmentUpdate,
 )
 from app.models.assignment import Assignment, AssignmentSubmission
+from app.services.archive_actions import archive_record
 from app.services.audit_service import AuditService, write_audit
-from app.utils.exceptions import NotFoundError
+from app.services.course_service import course_is_operational, require_active_course
+from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
 class AssignmentService:
@@ -20,14 +24,17 @@ class AssignmentService:
         assignment_repo: AssignmentRepository,
         submission_repo: AssignmentSubmissionRepository,
         *,
+        courses: CourseRepository | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._assignments = assignment_repo
         self._submissions = submission_repo
+        self._courses = courses
         self._audit = audit
 
     async def create_assignment(self, payload: AssignmentCreate, created_by: str) -> Assignment:
         """Create a new assignment."""
+        await require_active_course(self._courses, payload.course_id)
         return await self._assignments.create_assignment(
             course_id=payload.course_id,
             title=payload.title,
@@ -53,9 +60,14 @@ class AssignmentService:
         *,
         skip: int = 0,
         limit: int = 100,
+        published_only: bool = False,
     ) -> tuple[list[Assignment], int]:
         """Page assignments for one course without loading the whole set into Python."""
-        return await self._assignments.list_page(course_id, skip=skip, limit=limit, published_only=False)
+        if not await course_is_operational(self._courses, course_id):
+            return [], 0
+        return await self._assignments.list_page(
+            course_id, skip=skip, limit=limit, published_only=published_only
+        )
 
     async def get_course_assignments(
         self,
@@ -63,7 +75,15 @@ class AssignmentService:
         published_only: bool = True,
     ) -> list[Assignment]:
         """Get all assignments for a course."""
+        if not await course_is_operational(self._courses, course_id):
+            return []
         return await self._assignments.get_by_course(course_id, published_only)
+
+    async def count_published(self, course_id: str) -> int:
+        """Published assignment count for an operational course. Does not load the rows."""
+        if not await course_is_operational(self._courses, course_id):
+            return 0
+        return await self._assignments.count_for_course(course_id, published_only=True)
 
     async def update_assignment(
         self,
@@ -72,6 +92,7 @@ class AssignmentService:
     ) -> Assignment:
         """Update an assignment."""
         assignment = await self.get_assignment(assignment_id)
+        await require_active_course(self._courses, assignment.course_id)
         
         update_data: dict[str, any] = {}
         if payload.title is not None:
@@ -94,12 +115,27 @@ class AssignmentService:
             raise NotFoundError("Assignment not found")
         return updated
 
-    async def delete_assignment(self, assignment_id: str) -> None:
-        """Delete an assignment."""
+    async def delete_assignment(
+        self,
+        assignment_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive an assignment. Student submissions stay stored."""
+        if not is_management(actor_role):
+            raise ForbiddenError("Management access required")
         assignment = await self.get_assignment(assignment_id)
-        deleted = await self._assignments.delete(assignment_id)
-        if not deleted:
-            raise NotFoundError("Assignment not found")
+        await archive_record(
+            self._assignments,
+            assignment,
+            archived_by=archived_by,
+            deactivate=False,
+            audit=self._audit,
+            action="assignment.delete",
+            entity_type="assignment",
+            not_found="Assignment not found",
+        )
 
     async def submit_assignment(
         self,
@@ -109,7 +145,7 @@ class AssignmentService:
         enrollment_id: str,
     ) -> AssignmentSubmission:
         """Submit an assignment."""
-        # Check if assignment exists
+        await require_active_course(self._courses, course_id)
         await self.get_assignment(payload.assignment_id)
         
         return await self._submissions.create_submission(
@@ -132,6 +168,15 @@ class AssignmentService:
     async def get_assignment_submissions(self, assignment_id: str) -> list[AssignmentSubmission]:
         """Get all submissions for an assignment."""
         return await self._submissions.get_by_assignment(assignment_id)
+
+    async def page_assignment_submissions(
+        self,
+        assignment_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[AssignmentSubmission], int]:
+        return await self._submissions.page_by_assignment(assignment_id, skip=skip, limit=limit)
 
     async def grade_submission(
         self,

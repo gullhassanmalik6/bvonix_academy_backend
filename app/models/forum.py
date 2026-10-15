@@ -26,6 +26,8 @@ class ForumPost:
     views: int
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
+    archived_by: str | None = None
 
     @staticmethod
     def now_utc() -> datetime:

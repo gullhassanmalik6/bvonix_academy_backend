@@ -51,8 +51,8 @@ class _Pages:
     def __init__(self, items) -> None:
         self.items = items
 
-    async def list_page(self, course_id: str, *, skip: int = 0, limit: int = 100, published_only: bool = False):
-        return self.items, len(self.items)
+    async def get_by_course(self, course_id: str, published_only: bool = True):
+        return list(self.items)
 
 
 class _Record:

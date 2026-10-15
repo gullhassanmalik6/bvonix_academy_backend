@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from app.schemas.common import APIModel
 
@@ -14,15 +14,38 @@ class CourseCreate(APIModel):
     duration_hours: int = Field(ge=1, le=1000)
     price: float = Field(ge=0.0)
     is_published: bool = False
+    image_url: str | None = None
 
 
 class CourseUpdate(APIModel):
+    """Course edit payload. Unknown fields are rejected so a client cannot set them."""
+
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(default=None, min_length=3, max_length=200)
     description: str | None = Field(default=None, min_length=10, max_length=5000)
     instructor_id: str | None = None
     duration_hours: int | None = Field(default=None, ge=1, le=1000)
     price: float | None = Field(default=None, ge=0.0)
     is_published: bool | None = None
+    image_url: str | None = None
+    clear_image: bool = False
+
+
+def course_to_public(course, instructor_name: str | None = None) -> "CoursePublic":
+    return CoursePublic(
+        id=course.id,
+        title=course.title,
+        description=course.description,
+        instructor_id=course.instructor_id,
+        instructor_name=instructor_name,
+        duration_hours=course.duration_hours,
+        price=course.price,
+        is_published=course.is_published,
+        image_url=getattr(course, "image_url", None),
+        created_at=course.created_at,
+        updated_at=course.updated_at,
+    )
 
 
 class CoursePublic(APIModel):
@@ -30,9 +53,11 @@ class CoursePublic(APIModel):
     title: str
     description: str
     instructor_id: str
+    instructor_name: str | None = None
     duration_hours: int
     price: float
     is_published: bool
+    image_url: str | None = None
     created_at: datetime
     updated_at: datetime
 

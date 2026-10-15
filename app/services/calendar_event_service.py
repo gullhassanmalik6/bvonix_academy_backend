@@ -4,14 +4,23 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.repositories.calendar_event_repository import CalendarEventRepository
+from app.repositories.course_repository import CourseRepository
 from app.schemas.calendar_event import CalendarEventCreate, CalendarEventUpdate
 from app.models.calendar_event import CalendarEvent
+from app.services.archive_actions import archive_record
+from app.services.course_service import course_is_operational, require_active_course
 from app.utils.exceptions import NotFoundError
 
 
 class CalendarEventService:
-    def __init__(self, event_repo: CalendarEventRepository) -> None:
+    def __init__(
+        self,
+        event_repo: CalendarEventRepository,
+        *,
+        courses: CourseRepository | None = None,
+    ) -> None:
         self._events = event_repo
+        self._courses = courses
 
     async def create_event(
         self,
@@ -19,6 +28,7 @@ class CalendarEventService:
         created_by: str,
     ) -> CalendarEvent:
         """Create a new calendar event."""
+        await require_active_course(self._courses, payload.course_id)
         return await self._events.create_event(
             course_id=payload.course_id,
             event_type=payload.event_type,
@@ -48,6 +58,8 @@ class CalendarEventService:
         end_date: datetime | None = None,
     ) -> list[CalendarEvent]:
         """Get events for a course."""
+        if course_id and not await course_is_operational(self._courses, course_id):
+            return []
         return await self._events.get_by_course(course_id, start_date, end_date)
 
     async def get_student_events(
@@ -57,7 +69,30 @@ class CalendarEventService:
         end_date: datetime | None = None,
     ) -> list[CalendarEvent]:
         """Get events for a student's enrolled courses."""
-        return await self._events.get_student_events(course_ids, start_date, end_date)
+        current_ids = []
+        for course_id in course_ids:
+            if await course_is_operational(self._courses, course_id):
+                current_ids.append(course_id)
+        return await self._events.get_student_events(current_ids, start_date, end_date)
+
+    async def page_student_events(
+        self,
+        course_ids: list[str],
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list, int]:
+        """Page events for operational courses. Parent checks are one batched lookup."""
+        if self._courses is None:
+            current_ids = course_ids
+        else:
+            active = await self._courses.load_by_ids(course_ids)
+            current_ids = list(active)
+        return await self._events.page_student_events(
+            current_ids, start_date, end_date, skip=skip, limit=limit
+        )
 
     async def update_event(
         self,
@@ -66,6 +101,7 @@ class CalendarEventService:
     ) -> CalendarEvent:
         """Update an event."""
         event = await self.get_event(event_id)
+        await require_active_course(self._courses, event.course_id)
         
         update_data: dict[str, Any] = {}
         if payload.title is not None:
@@ -90,9 +126,16 @@ class CalendarEventService:
             raise NotFoundError("Event not found")
         return updated
 
-    async def delete_event(self, event_id: str) -> None:
-        """Delete an event."""
+    async def delete_event(self, event_id: str, *, archived_by: str | None = None) -> None:
+        """Archive a calendar event. There is no public hard-delete route."""
         event = await self.get_event(event_id)
-        deleted = await self._events.delete(event_id)
-        if not deleted:
-            raise NotFoundError("Event not found")
+        await archive_record(
+            self._events,
+            event,
+            archived_by=archived_by,
+            deactivate=False,
+            audit=None,
+            action="calendar.delete",
+            entity_type="calendar_event",
+            not_found="Event not found",
+        )

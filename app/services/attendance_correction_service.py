@@ -16,8 +16,10 @@ from app.core.permissions import is_management
 from app.models.attendance_correction import AttendanceCorrection
 from app.repositories.archival import record_is_active
 from app.repositories.attendance_correction_repository import AttendanceCorrectionRepository
+from app.repositories.course_repository import CourseRepository
 from app.services.attendance_service import AttendanceService
 from app.services.audit_service import AuditService
+from app.services.course_service import require_active_course
 from app.utils.exceptions import AppError, ConflictError, ForbiddenError, NotFoundError
 
 
@@ -27,10 +29,12 @@ class AttendanceCorrectionService:
         corrections: AttendanceCorrectionRepository,
         attendance: AttendanceService,
         *,
+        courses: CourseRepository | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._corrections = corrections
         self._attendance = attendance
+        self._courses = courses
         self._audit = audit
 
     async def request_correction(
@@ -52,6 +56,7 @@ class AttendanceCorrectionService:
         attendance = await self._attendance.get_attendance(attendance_id)
         if not record_is_active(attendance) or attendance.student_id != student_id:
             raise NotFoundError("Attendance not found")
+        await require_active_course(self._courses, attendance.course_id)
         if requested_status == attendance.status:
             raise ConflictError("Requested status matches the current attendance mark")
 

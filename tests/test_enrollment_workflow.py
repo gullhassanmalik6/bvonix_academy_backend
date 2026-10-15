@@ -125,7 +125,7 @@ class EnrollmentWorkflowTests(unittest.TestCase):
 
         service = PaymentService(_Payments(_payment("completed")))
         with self.assertRaises(ConflictError):
-            asyncio.run(service.update_payment("pay-1", PaymentUpdate(payment_status="pending")))
+            asyncio.run(service.update_payment("pay-1", PaymentUpdate(payment_status="pending"), actor_role="admin"))
 
 
 if __name__ == "__main__":

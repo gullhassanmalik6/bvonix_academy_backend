@@ -36,8 +36,12 @@ async def create_admin(email: str, password: str, full_name: str = None):
             # Update to admin
             from bson import ObjectId
             from datetime import datetime, timezone
-            update_data = {"role": "admin"}
-            update_data["updated_at"] = datetime.now(timezone.utc)
+            update_data = {
+                "role": "admin",
+                "hashed_password": hash_password(password),
+                "is_active": True,
+                "updated_at": datetime.now(timezone.utc),
+            }
             
             await user_repo.collection.update_one(
                 {"_id": ObjectId(existing_user.id)},

@@ -86,11 +86,7 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
         )
 
     async def get_by_id(self, scholarship_id: str) -> Scholarship | None:
-        try:
-            oid = ObjectId(scholarship_id)
-        except Exception:
-            return None
-        doc = await self.collection.find_one({"_id": oid})
+        doc = await self.find_document_by_id(scholarship_id)
         return self._to_model(doc) if doc else None
 
     async def get_by_student(self, student_id: str, status: str | None = None) -> list[Scholarship]:
@@ -100,13 +96,28 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
         except Exception:
             return []
         
-        filter_dict: dict[str, Any] = with_active({"student_id": student_oid})
+        query: dict[str, Any] = {"student_id": student_oid}
         if status:
-            filter_dict["status"] = status
-        
-        cursor = self.collection.find(filter_dict)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+            query["status"] = status
+        return await self.collect(query, sort=[("created_at", DESCENDING)])
+
+    async def page_for_student(
+        self,
+        student_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Scholarship], int]:
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {"student_id": student_oid},
+            skip=skip,
+            limit=limit,
+            sort=[("created_at", DESCENDING)],
+        )
 
     async def get_active_by_student(self, student_id: str) -> list[Scholarship]:
         """Get active scholarships for a student."""
@@ -120,15 +131,16 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
         except Exception:
             return []
         
-        cursor = self.collection.find(with_active({
-            "student_id": student_oid,
-            "$or": [
-                {"course_id": course_oid},
-                {"course_id": None},  # Scholarships for all courses
-            ],
-        }))
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {
+                "student_id": student_oid,
+                "$or": [
+                    {"course_id": course_oid},
+                    {"course_id": None},
+                ],
+            },
+            sort=[("created_at", DESCENDING)],
+        )
 
     async def create_scholarship(
         self,
@@ -187,7 +199,7 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
         except Exception:
             return None
         
-        doc = await self.collection.find_one({"_id": oid})
+        doc = await self.collection.find_one(with_active({"_id": oid}))
         if not doc:
             return None
         
@@ -209,7 +221,7 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
             }
 
         result = await self.collection.find_one_and_update(
-            {"_id": oid},
+            with_active({"_id": oid}),
             update_op,
             return_document=True,
         )
@@ -252,7 +264,7 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
                 pass
 
         result = await self.collection.find_one_and_update(
-            {"_id": oid},
+            with_active({"_id": oid}),
             {"$set": update_fields},
             return_document=True,
         )
@@ -269,7 +281,7 @@ class ScholarshipRepository(BaseRepository[Scholarship]):
             return None
         
         result = await self.collection.find_one_and_update(
-            {"_id": oid},
+            with_active({"_id": oid}),
             {
                 "$set": {
                     "current_month_absences": 0,

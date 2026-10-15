@@ -11,9 +11,12 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.permissions import is_admin
 from app.models.student import Student
+from app.repositories.course_repository import CourseRepository
+from app.repositories.enrollment_repository import EnrollmentRepository
 from app.repositories.student_repository import StudentRepository
 from app.schemas.student import StudentCreate, StudentUpdate
-from app.services.archive_actions import archive_record, purge_record
+from app.services.enrollment_registration import EnrollmentRegistration
+from app.services.archive_actions import archive_record, load_for_maintenance, purge_record
 from app.services.audit_service import AuditService
 from app.utils.exceptions import ConflictError, ForbiddenError, NotFoundError
 
@@ -59,54 +62,66 @@ class StudentService:
         except DuplicateKeyError as e:
             raise ConflictError("Student already exists for this user") from e
 
-    async def update_student(self, student_id: str, payload: StudentUpdate) -> Student:
-        """Update a student."""
+    async def update_student(
+        self,
+        student_id: str,
+        payload: StudentUpdate,
+        *,
+        enrollments: EnrollmentRepository | None = None,
+    ) -> Student:
+        """Update profile flags. A submitted course list is rebuilt from enrollments."""
         student = await self.get_student(student_id)
-        
+        align_courses = payload.enrolled_courses is not None
+
         update_data: dict[str, any] = {}
-        if payload.enrolled_courses is not None:
-            from bson import ObjectId
-            try:
-                update_data["enrolled_courses"] = [ObjectId(cid) for cid in payload.enrolled_courses]
-            except Exception:
-                raise NotFoundError("Invalid course IDs")
         if payload.is_active is not None:
             update_data["is_active"] = payload.is_active
-        
-        if not update_data:
+
+        if update_data:
+            from datetime import datetime, timezone
+            update_data["updated_at"] = datetime.now(timezone.utc)
+            student = await self._students.update(student_id, update_data)
+            if student is None:
+                raise NotFoundError("Student not found")
+        if not align_courses:
             return student
-        
-        from datetime import datetime, timezone
-        update_data["updated_at"] = datetime.now(timezone.utc)
-        
-        updated_student = await self._students.update(student_id, update_data)
-        if updated_student is None:
-            raise NotFoundError("Student not found")
-        return updated_student
+        if enrollments is None:
+            raise ConflictError("The student course list is derived from enrollments and was not replaced.")
+        return await self._repair_course_list(student_id, enrollments)
 
-    async def enroll_in_course(self, student_id: str, course_id: str) -> Student:
-        """Enroll a student in a course."""
-        student = await self.get_student(student_id)
-        # Verify course exists
-        from app.repositories.course_repository import CourseRepository
-        from app.db.mongodb import mongodb
-        course_repo = CourseRepository(mongodb.db)
-        course = await course_repo.get_by_id(course_id)
-        if course is None:
+    async def enroll_in_course(
+        self,
+        student_id: str,
+        course_id: str,
+        *,
+        enrollments: EnrollmentRepository,
+        courses: CourseRepository,
+    ) -> Student:
+        """Repair the compatibility list. This does not create an enrollment."""
+        await self.get_student(student_id)
+        if await courses.get_by_id(course_id) is None:
             raise NotFoundError("Course not found")
-        
-        updated_student = await self._students.enroll_in_course(student_id, course_id)
-        if updated_student is None:
-            raise NotFoundError("Student not found")
-        return updated_student
+        return await self._repair_course_list(student_id, enrollments)
 
-    async def unenroll_from_course(self, student_id: str, course_id: str) -> Student:
-        """Unenroll a student from a course."""
-        student = await self.get_student(student_id)
-        updated_student = await self._students.unenroll_from_course(student_id, course_id)
-        if updated_student is None:
-            raise NotFoundError("Student not found")
-        return updated_student
+    async def unenroll_from_course(
+        self,
+        student_id: str,
+        course_id: str,
+        *,
+        enrollments: EnrollmentRepository,
+    ) -> Student:
+        """Repair the compatibility list. This does not cancel an enrollment."""
+        from bson import ObjectId
+
+        await self.get_student(student_id)
+        try:
+            ObjectId(course_id)
+        except Exception:
+            raise NotFoundError("Course not found")
+        return await self._repair_course_list(student_id, enrollments)
+
+    async def _repair_course_list(self, student_id: str, enrollments: EnrollmentRepository) -> Student:
+        return await EnrollmentRegistration(enrollments, self._students).repair_course_list(student_id)
 
     async def delete_student(
         self,
@@ -132,7 +147,7 @@ class StudentService:
 
     async def purge_student(self, student_id: str, *, actor_role: str, actor_id: str) -> None:
         """Permanently remove a student profile. Super admin only."""
-        student = await self.get_student(student_id)
+        student = await load_for_maintenance(self._students, student_id, not_found="Student not found")
         await purge_record(
             self._students,
             student,

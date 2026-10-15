@@ -201,7 +201,7 @@ async def _resolve_enrollment_context(
     if not enrollment.verified_by_admin and not is_admin:
         raise ForbiddenError("Card available after admin verification")
 
-    course = await course_repo.get_by_id(enrollment.course_id)
+    course = await course_repo.get_including_archived(enrollment.course_id)
     if not course:
         raise NotFoundError("Course not found")
 

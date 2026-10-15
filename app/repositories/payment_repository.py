@@ -32,6 +32,9 @@ class PaymentRepository(BaseRepository[Payment]):
         await self.collection.create_index([("created_at", DESCENDING)])
         await self.collection.create_index([("payment_status", ASCENDING), ("created_at", DESCENDING)])
         await self.collection.create_index([("student_id", ASCENDING), ("created_at", DESCENDING)])
+        await self.collection.create_index([("enrollment_id", ASCENDING), ("payment_status", ASCENDING)])
+        await self.collection.create_index([("client_request_id", ASCENDING)], unique=True, sparse=True)
+        await self.collection.create_index([("receipt_url", ASCENDING)], sparse=True)
 
     def _to_model(self, doc: dict[str, Any]) -> Payment:
         return Payment(
@@ -55,6 +58,9 @@ class PaymentRepository(BaseRepository[Payment]):
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
             archived_at=doc.get("archived_at"),
             archived_by=doc.get("archived_by"),
+            receipt_url=doc.get("receipt_url"),
+            client_request_id=doc.get("client_request_id"),
+            audit_pending=doc.get("audit_pending") or None,
         )
 
     async def list_page(
@@ -94,6 +100,15 @@ class PaymentRepository(BaseRepository[Payment]):
             sort=sort_pairs(sort, allowed=PAYMENT_SORTS, default="-created_at"),
         )
 
+    async def get_by_id(self, payment_id: str) -> Payment | None:
+        """Load one active payment. Archived rows stay out of operational reads."""
+        try:
+            oid = ObjectId(payment_id)
+        except Exception:
+            return None
+        doc = await self.collection.find_one(with_active({"_id": oid}))
+        return self._to_model(doc) if doc else None
+
     async def get_by_student(self, student_id: str) -> list[Payment]:
         """Get all payments for a student."""
         try:
@@ -101,9 +116,28 @@ class PaymentRepository(BaseRepository[Payment]):
         except Exception:
             return []
         
-        cursor = self.collection.find(with_active({"student_id": student_oid})).sort("created_at", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"student_id": student_oid},
+            sort=[("created_at", DESCENDING)],
+        )
+
+    async def page_for_student(
+        self,
+        student_id: str,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[Payment], int]:
+        try:
+            student_oid = ObjectId(student_id)
+        except Exception:
+            return [], 0
+        return await self.find_page(
+            {"student_id": student_oid},
+            skip=skip,
+            limit=limit,
+            sort=[("created_at", DESCENDING)],
+        )
 
     async def get_by_course(self, course_id: str) -> list[Payment]:
         """Get all payments for a course."""
@@ -112,9 +146,10 @@ class PaymentRepository(BaseRepository[Payment]):
         except Exception:
             return []
         
-        cursor = self.collection.find(with_active({"course_id": course_oid})).sort("created_at", -1)
-        docs = await cursor.to_list(length=1000)
-        return [self._to_model(doc) for doc in docs]
+        return await self.collect(
+            {"course_id": course_oid},
+            sort=[("created_at", DESCENDING)],
+        )
 
     async def create_payment(
         self,
@@ -129,6 +164,10 @@ class PaymentRepository(BaseRepository[Payment]):
         scholarship_discount: float,
         notes: str | None,
         created_by: str | None,
+        payment_status: str = "pending",
+        payment_date: datetime | None = None,
+        receipt_url: str | None = None,
+        client_request_id: str | None = None,
     ) -> Payment:
         now = datetime.now(timezone.utc)
         try:
@@ -149,11 +188,13 @@ class PaymentRepository(BaseRepository[Payment]):
             "amount": amount,
             "currency": currency,
             "payment_method": payment_method,
-            "payment_status": "pending",
+            "payment_status": payment_status,
             "transaction_id": None,
             "invoice_number": invoice_number,
             "invoice_url": None,
-            "payment_date": None,
+            "payment_date": payment_date,
+            "receipt_url": receipt_url,
+            "client_request_id": client_request_id,
             "due_date": due_date,
             "scholarship_discount": scholarship_discount,
             "notes": notes,
@@ -164,3 +205,36 @@ class PaymentRepository(BaseRepository[Payment]):
         result = await self.collection.insert_one(payload)
         payload["_id"] = result.inserted_id
         return self._to_model(payload)
+
+    async def for_enrollment(self, enrollment_id: str) -> list[Payment]:
+        try:
+            enrollment_oid = ObjectId(enrollment_id)
+        except Exception:
+            return []
+        return await self.collect(
+            {"enrollment_id": enrollment_oid},
+            sort=[("created_at", DESCENDING)],
+        )
+
+    async def find_by_receipt_url(self, url: str) -> Payment | None:
+        if not url:
+            return None
+        doc = await self.collection.find_one(with_active({"receipt_url": url}))
+        return self._to_model(doc) if doc else None
+
+    async def find_by_client_request(self, client_request_id: str) -> Payment | None:
+        if not client_request_id:
+            return None
+        doc = await self.collection.find_one(with_active({"client_request_id": client_request_id}))
+        return self._to_model(doc) if doc else None
+
+    async def attach_receipt(self, enrollment_id: str, receipt_url: str) -> None:
+        """Link a receipt to existing pending ledger rows. Does not change their status."""
+        pending = [
+            payment
+            for payment in await self.for_enrollment(enrollment_id)
+            if payment.payment_status == "pending" and not payment.receipt_url
+        ]
+        now = datetime.now(timezone.utc)
+        for payment in pending:
+            await self.update(payment.id, {"receipt_url": receipt_url, "updated_at": now})

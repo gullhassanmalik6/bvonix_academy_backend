@@ -6,6 +6,7 @@ from typing import Any
 
 from pymongo import ASCENDING
 
+from app.db.index_status import ensure_required_index
 from app.models.auth_session import AuthSession
 from app.repositories.base import BaseRepository
 
@@ -20,7 +21,7 @@ class SessionRepository(BaseRepository[AuthSession]):
     collection_name = "auth_sessions"
 
     async def ensure_indexes(self) -> None:
-        await self.collection.create_index([("token_hash", ASCENDING)], unique=True)
+        await ensure_required_index(self.collection, [("token_hash", ASCENDING)], unique=True)
         await self.collection.create_index([("user_id", ASCENDING), ("revoked_at", ASCENDING)])
         await self.collection.create_index([("expires_at", ASCENDING)])
 

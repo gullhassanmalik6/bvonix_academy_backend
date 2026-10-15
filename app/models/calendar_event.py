@@ -27,6 +27,8 @@ class CalendarEvent:
     created_by: str  # User ID who created the event
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
+    archived_by: str | None = None
 
     @staticmethod
     def now_utc() -> datetime:

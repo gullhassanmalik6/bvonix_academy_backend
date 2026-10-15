@@ -452,7 +452,9 @@ async def create_certificates(db, enrollments, certificate_repo):
 async def add_dummy_data():
     """Main function to add all dummy data."""
     settings = get_settings()
-    
+    if settings.app_env.lower() in {"production", "prod"}:
+        raise SystemExit("Refusing to seed demo rows while APP_ENV is production.")
+
     # Connect to MongoDB
     client = make_client(settings)
     db = client[settings.mongodb_db]
@@ -479,7 +481,7 @@ async def add_dummy_data():
         student_ids = await create_students(db, user_repo, student_repo)
         
         # 3. Get all courses
-        all_courses = await course_repo.list(skip=0, limit=1000)
+        all_courses = await course_repo.collect(sort=[("created_at", 1)])
         course_ids = [course.id for course in all_courses]
         
         if not course_ids:
@@ -494,7 +496,7 @@ async def add_dummy_data():
         # 5. Get enrollment objects for results/attendance/certificates
         enrollments = []
         # Get all enrollments from the database
-        all_enrollments = await enrollment_repo.list(skip=0, limit=1000)
+        all_enrollments = await enrollment_repo.collect(sort=[("created_at", 1)])
         # Filter to only include the ones we just created
         enrollment_id_set = set(enrollment_ids)
         enrollments = [e for e in all_enrollments if e.id in enrollment_id_set]
@@ -520,6 +522,7 @@ async def add_dummy_data():
         print(f"\n[ERROR] Failed to seed dummy data: {e}")
         import traceback
         traceback.print_exc()
+        raise SystemExit(1) from e
     finally:
         client.close()
 

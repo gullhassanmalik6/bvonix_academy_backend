@@ -12,7 +12,6 @@ from typing import Literal
 
 from app.core.auth import get_current_user
 from app.core.permissions import is_management
-from app.repositories.archival import record_is_active
 from app.repositories.listing import text_clause
 from app.core.dependencies import (
     get_course_repository,
@@ -36,10 +35,12 @@ class SearchResult(APIModel):
 
 
 class SearchResponse(APIModel):
-    """Search response."""
+    """Search response. total is the matching record count, which can exceed len(results)."""
     query: str
     results: list[SearchResult]
     total: int
+    skip: int = 0
+    limit: int = 20
 
 
 router = APIRouter()
@@ -54,19 +55,27 @@ async def search(
     student_repo: StudentRepository = Depends(get_student_repository),
     user_repo: UserRepository = Depends(get_user_repository),
     current_user: User = Depends(get_current_user),
+    skip: int = Query(default=0, ge=0),
 ) -> SearchResponse:
-    """Global search across courses, students, users, and materials."""
-    search_types = [t.strip() for t in types.split(",")]
+    """Global search. Each requested type contributes one page, and total is the sum of database counts."""
+    search_types = [t.strip() for t in types.split(",") if t.strip()]
+    requested_limit = limit if isinstance(limit, int) and not isinstance(limit, bool) else 20
+    page_limit = min(max(requested_limit, 1), 50)
+    page_skip = max(skip, 0) if isinstance(skip, int) and not isinstance(skip, bool) else 0
     all_results: list[SearchResult] = []
-    
-    # Search courses in the database, then keep at most `limit` hits.
+    total = 0
+
     if "course" in search_types:
-        courses, _total = await course_repo.find_page(
-            text_clause(q, ("title", "description")),
-            skip=0,
-            limit=limit,
+        course_query = text_clause(q, ("title", "description"))
+        if not is_management(current_user.role):
+            course_query["is_published"] = True
+        courses, course_total = await course_repo.find_page(
+            course_query,
+            skip=page_skip,
+            limit=page_limit,
             sort=[("title", 1)],
         )
+        total += course_total
         for course in courses:
             all_results.append(SearchResult(
                 type="course",
@@ -75,18 +84,17 @@ async def search(
                 description=course.description,
                 url=f"/courses/{course.id}",
             ))
-    
+
     # Student and user records are management data.
     if "user" in search_types and is_management(current_user.role):
-        users, _total = await user_repo.find_page(
+        users, user_total = await user_repo.find_page(
             text_clause(q, ("email", "full_name")),
-            skip=0,
-            limit=limit,
+            skip=page_skip,
+            limit=page_limit,
             sort=[("full_name", 1)],
         )
+        total += user_total
         for user in users:
-            if not record_is_active(user):
-                continue
             all_results.append(SearchResult(
                 type="user",
                 id=user.id,
@@ -96,35 +104,24 @@ async def search(
             ))
 
     if "student" in search_types and is_management(current_user.role):
-        matched_users, _total = await user_repo.find_page(
-            text_clause(q, ("email", "full_name")),
-            skip=0,
-            limit=limit,
-            sort=[("full_name", 1)],
-        )
-        profiles = await student_repo.find_active_by_user_ids([user.id for user in matched_users])
-        names = {user.id: user for user in matched_users if record_is_active(user)}
-        for student in profiles:
-            if not record_is_active(student):
-                continue
-            account = names.get(student.user_id)
-            if account is None:
-                continue
+        students, student_total = await student_repo.list_page(q=q, skip=page_skip, limit=page_limit)
+        total += student_total
+        accounts = await user_repo.load_by_ids([student.user_id for student in students])
+        for student in students:
+            account = accounts.get(student.user_id)
+            title = (account.full_name or account.email) if account is not None else student.id
             all_results.append(SearchResult(
                 type="student",
                 id=student.id,
-                title=account.full_name or account.email,
+                title=title,
                 description=f"Student ID: {student.id}",
                 url=f"/admin/students/{student.id}",
             ))
-            if len([item for item in all_results if item.type == "student"]) >= limit:
-                break
-    
-    # Limit total results
-    all_results = all_results[:limit * len(search_types)]
-    
+
     return SearchResponse(
         query=q,
         results=all_results,
-        total=len(all_results),
+        total=total,
+        skip=page_skip,
+        limit=page_limit,
     )

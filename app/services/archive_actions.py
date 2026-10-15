@@ -38,6 +38,15 @@ async def archive_record(
     return archived
 
 
+async def load_for_maintenance(repo: Any, record_id: str, *, not_found: str) -> Any:
+    """Load a row for purge, including one that operational lookups hide."""
+    loader = getattr(repo, "get_including_archived", None)
+    record = await loader(record_id) if loader else await repo.get_by_id(record_id)
+    if record is None:
+        raise NotFoundError(not_found)
+    return record
+
+
 async def purge_record(
     repo: Any,
     record: Any,
@@ -50,7 +59,8 @@ async def purge_record(
 ) -> None:
     """Permanently remove a record. Caller must already be a super admin."""
     assert_can_purge(actor_role)
-    removed = await repo.delete(record.id)
+    remover = getattr(repo, "purge_document", None)
+    removed = await remover(record.id) if remover else await repo.delete(record.id)
     if not removed:
         raise NotFoundError(not_found)
     await write_audit(

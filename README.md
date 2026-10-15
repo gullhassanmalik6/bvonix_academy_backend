@@ -1,78 +1,84 @@
-# Backend (FastAPI + MongoDB)
+# BvoniX Academy backend
+
+FastAPI and MongoDB API for the existing academy application. The frontend is the sibling `bvonix_academy_frontend` project. Instructor workspace screens are not part of this launch.
 
 ## Setup
 
-Create a virtualenv, install deps:
+From `bvonix_academy_backend`:
 
-```bash
-cd backend
+```text
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Environment variables
+Copy `env.example.txt` to `.env`. Do not commit `.env`.
 
-This repo contains `env.example.txt` as a template.
+Required values:
 
-Create `backend/.env` (not committed) and copy values from `env.example.txt`.
+| Variable | Role |
+| --- | --- |
+| `APP_ENV` | `development` locally. `production` or `prod` turns on startup checks. |
+| `MONGODB_URI` | Database URI. Production must not disable TLS certificate checks. |
+| `MONGODB_DB` | Database name. The application default is `bvonix_academy`. Test scripts refuse that name. |
+| `JWT_SECRET` | HS256 signing secret. Production rejects an empty value, a known placeholder, and a secret shorter than 32 bytes. |
+| `JWT_ALGORITHM` | `HS256`. Production rejects any other algorithm. |
+| `ALLOWED_ORIGINS` | Comma-separated frontend origins. Credentials are allowed. |
 
-Minimum required:
-- `MONGODB_URI`, `MONGODB_DB`
-- `JWT_SECRET`
+`env.example.txt` uses a local MongoDB URI and a placeholder secret so development can start. Production startup fails if that placeholder is still set. The process does not print the secret.
 
 ## Run
 
-```bash
-cd backend
-.venv\Scripts\activate
+```text
+.\.venv\Scripts\activate
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-API docs:
-- Swagger: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
+- `GET /health/live` reports the process only. It does not ping MongoDB.
+- `GET /health/ready` returns 503 when the database or upload storage is down.
+- `GET /api/health` remains `{status: ok}`.
+- Interactive docs: `http://localhost:8000/docs`.
 
-## Endpoints (v1)
+Production (`APP_ENV=production` or `prod`) refuses to start when MongoDB does not answer, when `JWT_SECRET` is unusable, when `ALLOWED_ORIGINS` is empty, or when the URI disables TLS certificate validation. Other environments keep running and expose a database failure on `/health/ready`. Index creation errors are logged and do not abort startup. A failed unique or other integrity index makes `/health/ready` return `not_ready`. Performance-index failures stay in the log and do not change readiness by themselves.
 
-### Health
-- `GET /api/health` - Health check
-- `GET /` - API information
+## Authentication
 
-### Authentication
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - Login and get JWT token
-- `GET /api/auth/me` - Get current user (protected)
+Access tokens are bearer tokens. Refresh tokens are an HttpOnly, Secure, SameSite=None cookie named `bvonix_refresh` on `{API_PREFIX}/auth`. Archived or inactive accounts cannot log in, refresh, or use an old access token. Role checks run on the server. Login roles are `user`, `academic_manager`, `admin`, and `super_admin`. Instructor is a profile linked to a user, not a login role.
 
-### Users
-- `GET /api/users` - List all users (paginated, protected)
-- `GET /api/users/{user_id}` - Get user by ID (protected)
-- `PATCH /api/users/{user_id}` - Update user (protected)
-- `DELETE /api/users/{user_id}` - Delete user (protected)
+## Uploads
 
-### Courses
-- `GET /api/courses` - List all courses (paginated, protected)
-  - Query params: `skip`, `limit`, `published_only`
-- `GET /api/courses/{course_id}` - Get course by ID (protected)
-- `GET /api/courses/instructor/{instructor_id}/courses` - Get courses by instructor (protected)
-- `POST /api/courses` - Create new course (protected)
-- `PATCH /api/courses/{course_id}` - Update course (protected)
-- `DELETE /api/courses/{course_id}` - Delete course (protected)
+Public site assets are served from `/uploads/logos`, `/uploads/hero_icons`, `/uploads/community_images`, `/uploads/benefit_icons`, `/uploads/subject_icons`, `/uploads/testimonial_avatars`, and `/uploads/academy_logo.png` when that file exists.
 
-### Instructors
-- `GET /api/instructors` - List all instructors (paginated, protected)
-- `GET /api/instructors/{instructor_id}` - Get instructor by ID (protected)
-- `GET /api/instructors/user/{user_id}` - Get instructor by user_id (protected)
-- `POST /api/instructors` - Create new instructor (protected)
-- `PATCH /api/instructors/{instructor_id}` - Update instructor (protected)
-- `DELETE /api/instructors/{instructor_id}` - Delete instructor (protected)
+Receipts, profile images, and enrollment-card PDFs are not on those mounts. An authenticated client downloads them from `GET /api/uploads/private/{kind}/{filename}`. The student who owns the enrollment, or a management role, may read the file. Another student receives 403. A missing file, an unknown name, or a path that leaves the directory returns 404 with `File not found`. Errors do not include the filesystem path.
 
-### Students
-- `GET /api/students` - List all students (paginated, protected)
-- `GET /api/students/{student_id}` - Get student by ID (protected)
-- `GET /api/students/user/{user_id}` - Get student by user_id (protected)
-- `POST /api/students` - Create new student (protected)
-- `PATCH /api/students/{student_id}` - Update student (protected)
-- `POST /api/students/{student_id}/enroll/{course_id}` - Enroll student in course (protected)
-- `POST /api/students/{student_id}/unenroll/{course_id}` - Unenroll student from course (protected)
-- `DELETE /api/students/{student_id}` - Delete student (protected)
+## Enrollment, payments, and audit
+
+Enrollment lifecycle and ledger payments stay separate. `paid` is an enrollment payment status. `completed` is a ledger status. Uploading a receipt or verifying an enrollment does not create or complete a ledger row.
+
+Required decisions (review transition, verification, receipt upload, cancellation, and ledger status change) store `audit_pending` on the same document as the business change, then insert one audit row keyed by `operation_id`. If the insert fails, the response is HTTP 500: `The decision was saved, but the review history was not recorded.` Repeating that same decision writes the missing row and does not apply the business change again. A later different decision is still a new event. History that never received a pending marker is not invented. Audit rows cannot be updated or purged through the repository. Ledger creation remains best-effort.
+
+`students.enrolled_courses` is a compatibility list rebuilt from enrollments that are not cancelled. A cancelled enrollment still occupies the unique `(student_id, course_id)` pair.
+
+Read-only reports, with `--uri` and `--database` required:
+
+```text
+.\.venv\Scripts\python.exe scripts\payment_consistency_report.py --uri <uri> --database <name>
+.\.venv\Scripts\python.exe scripts\registration_consistency_report.py --uri <uri> --database <name>
+.\.venv\Scripts\python.exe scripts\reconcile_enrolled_courses.py --uri <uri> --database <name>
+```
+
+`--write` on the reconcile command is refused for production-like names and for any database whose name does not start with `bvonix_test`. Do not point these commands at production.
+
+## Tests
+
+```text
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Live MongoDB checks run only when `MONGODB_TEST_URI` and `MONGODB_TEST_DB` name a dedicated database whose name starts with `bvonix_test`. They are skipped otherwise.
+
+## More detail
+
+- `docs/enrollment-domain-separation.md`
+- `docs/payment-consistency.md`
+- `docs/final-release-readiness.md`

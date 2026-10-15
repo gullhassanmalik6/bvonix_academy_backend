@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+from app.core.permissions import is_management
 from app.repositories.course_material_repository import CourseMaterialRepository
+from app.repositories.course_repository import CourseRepository
 from app.schemas.course_material import CourseMaterialCreate, CourseMaterialUpdate
 from app.models.course_material import CourseMaterial
-from app.utils.exceptions import NotFoundError
+from app.services.archive_actions import archive_record
+from app.services.audit_service import AuditService
+from app.services.course_service import course_is_operational, require_active_course
+from app.utils.exceptions import ForbiddenError, NotFoundError
 
 
 class CourseMaterialService:
-    def __init__(self, material_repo: CourseMaterialRepository) -> None:
+    def __init__(
+        self,
+        material_repo: CourseMaterialRepository,
+        *,
+        courses: CourseRepository | None = None,
+        audit: AuditService | None = None,
+    ) -> None:
         self._materials = material_repo
+        self._courses = courses
+        self._audit = audit
 
     async def create_material(self, payload: CourseMaterialCreate, created_by: str) -> CourseMaterial:
         """Create a new course material."""
+        await require_active_course(self._courses, payload.course_id)
         return await self._materials.create_material(
             course_id=payload.course_id,
             title=payload.title,
@@ -40,9 +54,14 @@ class CourseMaterialService:
         *,
         skip: int = 0,
         limit: int = 100,
+        published_only: bool = False,
     ) -> tuple[list[CourseMaterial], int]:
         """Page materials for one course without loading the whole set into Python."""
-        return await self._materials.list_page(course_id, skip=skip, limit=limit, published_only=False)
+        if not await course_is_operational(self._courses, course_id):
+            return [], 0
+        return await self._materials.list_page(
+            course_id, skip=skip, limit=limit, published_only=published_only
+        )
 
     async def get_course_materials(
         self,
@@ -50,7 +69,19 @@ class CourseMaterialService:
         published_only: bool = True,
     ) -> list[CourseMaterial]:
         """Get all materials for a course."""
+        if not await course_is_operational(self._courses, course_id):
+            return []
         return await self._materials.get_by_course(course_id, published_only)
+
+    async def count_published(self, course_id: str) -> int:
+        """Published material count for an operational course. Does not load the rows."""
+        if not await course_is_operational(self._courses, course_id):
+            return 0
+        return await self._materials.count_for_course(course_id, published_only=True)
+
+    async def published_for_courses(self, course_ids: list[str]) -> dict[str, list[CourseMaterial]]:
+        """Published materials for the supplied active courses, loaded in batches."""
+        return await self._materials.find_published_for_courses(course_ids)
 
     async def update_material(
         self,
@@ -59,6 +90,7 @@ class CourseMaterialService:
     ) -> CourseMaterial:
         """Update a course material."""
         material = await self.get_material(material_id)
+        await require_active_course(self._courses, material.course_id)
         
         update_data: dict[str, any] = {}
         if payload.title is not None:
@@ -82,9 +114,24 @@ class CourseMaterialService:
             raise NotFoundError("Course material not found")
         return updated
 
-    async def delete_material(self, material_id: str) -> None:
-        """Delete a course material."""
+    async def delete_material(
+        self,
+        material_id: str,
+        *,
+        archived_by: str | None,
+        actor_role: str,
+    ) -> None:
+        """Archive a course material. Submissions and history are left in place."""
+        if not is_management(actor_role):
+            raise ForbiddenError("Management access required")
         material = await self.get_material(material_id)
-        deleted = await self._materials.delete(material_id)
-        if not deleted:
-            raise NotFoundError("Course material not found")
+        await archive_record(
+            self._materials,
+            material,
+            archived_by=archived_by,
+            deactivate=False,
+            audit=self._audit,
+            action="material.delete",
+            entity_type="material",
+            not_found="Course material not found",
+        )

@@ -8,7 +8,7 @@ from app.repositories.scholarship_repository import ScholarshipRepository
 from app.services.scholarship_service import ScholarshipService
 from app.schemas.attendance import AttendanceCreate, AttendanceUpdate
 from app.models.attendance import Attendance
-from app.services.archive_actions import archive_record, purge_record
+from app.services.archive_actions import archive_record, load_for_maintenance, purge_record
 from app.services.audit_service import AuditService, write_audit
 from app.utils.exceptions import ForbiddenError, NotFoundError
 
@@ -78,6 +78,9 @@ class AttendanceService:
             current=attendance,
         )
         return attendance
+
+    async def get_attendance_by_session(self, student_id: str, course_id: str, date: datetime) -> Attendance | None:
+        return await self._attendances.find_by_session(student_id, course_id, date)
 
     async def get_attendance(self, attendance_id: str) -> Attendance:
         """Get attendance by ID."""
@@ -195,7 +198,7 @@ class AttendanceService:
 
     async def purge_attendance(self, attendance_id: str, *, actor_role: str, actor_id: str) -> None:
         """Permanently remove an attendance mark. Super admin only."""
-        attendance = await self.get_attendance(attendance_id)
+        attendance = await load_for_maintenance(self._attendances, attendance_id, not_found="Attendance not found")
         await purge_record(
             self._attendances,
             attendance,
