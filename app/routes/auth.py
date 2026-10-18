@@ -66,16 +66,22 @@ async def refresh(
     return Token(access_token=issued.access_token)
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    response_model=None,
+)
 async def logout(
     request: Request,
     response: Response,
     auth: AuthService = Depends(get_auth_service),
-) -> None:
+) -> Response:
     """Revoke the current refresh session and clear its cookie."""
     _assert_trusted_origin(request)
     await auth.logout(request.cookies.get(REFRESH_COOKIE_NAME))
     clear_refresh_cookie(response)
+    return response
 
 
 @router.get("/me", response_model=UserPublic)
