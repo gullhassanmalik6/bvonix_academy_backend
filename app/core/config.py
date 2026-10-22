@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import List
+from urllib.parse import unquote, urlparse
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # app/.env, regardless of the directory used to start the server.
@@ -52,6 +54,39 @@ class Settings(BaseSettings):
 
     def allowed_origins_list(self) -> List[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+
+    @model_validator(mode="after")
+    def apply_railway_mongodb(self):
+        """Use Railway's MongoDB plugin variables when MONGODB_URI is not set.
+
+        Railway names the private connection string MONGO_URL. A reference to
+        that variable should connect the API without renaming it.
+        """
+        if not os.getenv("MONGODB_URI"):
+            for key in ("MONGO_URL", "MONGO_PUBLIC_URL"):
+                candidate = (os.getenv(key) or "").strip()
+                if candidate.startswith(("mongodb://", "mongodb+srv://")):
+                    self.mongodb_uri = candidate
+                    break
+
+        if not os.getenv("MONGODB_DB"):
+            database = _database_from_uri(self.mongodb_uri)
+            if database:
+                self.mongodb_db = database
+            else:
+                for key in ("MONGO_DATABASE", "MONGO_INITDB_DATABASE"):
+                    candidate = (os.getenv(key) or "").strip()
+                    if candidate:
+                        self.mongodb_db = candidate
+                        break
+        return self
+
+
+def _database_from_uri(uri: str) -> str:
+    path = unquote(urlparse(uri).path or "").strip("/")
+    if not path:
+        return ""
+    return path.split("/", 1)[0]
 
 
 @lru_cache
